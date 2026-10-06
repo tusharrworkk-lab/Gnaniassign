@@ -1,0 +1,17 @@
+[project]
+name = "gnaniassignment"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "tusharrworkk-lab", email = "tusharrworkk@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+gnaniassignment = "gnaniassignment:main"
+
+[build-system]
+requires = ["uv_build>=0.12.20,<0.13.0"]
+build-backend = "uv_build"
