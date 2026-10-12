@@ -6,24 +6,25 @@ import unittest
 
 from gnaniassignment.llm.agents.enquiry import enquiry_agents
 from gnaniassignment.llm.memory import ChatTurn, render_memory, select_memory, topic_from_query
-from gnaniassignment.llm.prompts.intents import INTENT_KEYS
+from gnaniassignment.llm.prompts.intents import QUESTIONS
 from gnaniassignment.llm.retrieval import IntentScopedRetriever
+from gnaniassignment.llm.router import DECISIONS_URL, JEV_MODEL, JevRouter
 from gnaniassignment.orchestration.graph import build_graph, select_intent
 from gnaniassignment.orchestration.session import TurnSession
 
 
 class Router:
-    def __init__(self, chosen: str = "user_core", score: float = 0.9) -> None:
-        self.chosen, self.score, self.fail = chosen, score, False
+    def __init__(self, chosen: str = "user_core", confidence: float = 0.9) -> None:
+        self.chosen, self.confidence, self.fail = chosen, confidence, False
         self.calls = 0
-        self.states: list[str] = []
+        self.states: list[dict] = []
 
     def predict(self, state, questions, model=None):
         self.calls += 1
         self.states.append(state)
         if self.fail:
             raise RuntimeError("temporary provider error")
-        return {"answers": {name: {"noul": self.score if name == self.chosen else 0.01} for name in questions}}
+        return {"answers": {"intent": {"type": "choice", "choice": self.chosen, "confidence": self.confidence}}}
 
 
 class Chat:
@@ -46,7 +47,7 @@ class Store:
 
 class PipelineTests(unittest.TestCase):
     def test_low_confidence_clarifies_without_chat_call(self):
-        router, chat = Router(score=0.2), Chat()
+        router, chat = Router(confidence=0.2), Chat()
         session = TurnSession(build_graph(router, enquiry_agents(chat), threshold=0.5))
         result = session.ask("Tell me about it")
         self.assertEqual(result["intent"], "clarify")
@@ -80,9 +81,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(render_memory(selected).count("Memory:"), 4)
         self.assertEqual(topic_from_query("Somewhere else?"), "general")
 
-    def test_invalid_jev_scores_are_rejected(self):
-        scores = {name: {"noul": 0.1} for name in INTENT_KEYS}
-        scores["user_core"]["noul"] = float("nan")
+    def test_invalid_jev_confidence_is_rejected(self):
+        scores = {"intent": {"choice": "user_core", "confidence": float("nan")}}
         with self.assertRaises(ValueError):
             select_intent(scores)
 
@@ -92,8 +92,14 @@ class PipelineTests(unittest.TestCase):
         session.ask("Where do you operate?")
         session.ask("Which regions?")
         session.ask("And there?")
-        self.assertEqual(router.states[-1].count("Memory:"), 2)
-        self.assertIn("Current user query: And there?", router.states[-1])
+        self.assertEqual(len(router.states[-1]["recent_conversation"]), 2)
+        self.assertEqual(router.states[-1]["current_query"], "And there?")
+
+    def test_other_choice_clarifies(self):
+        chat = Chat()
+        session = TurnSession(build_graph(Router(chosen="other"), enquiry_agents(chat)))
+        self.assertEqual(session.ask("Unrelated question")["intent"], "clarify")
+        self.assertEqual(chat.prompts, [])
 
     def test_only_selected_intent_store_is_queried(self):
         core, product = Store("Company fact"), Store("Product fact")
@@ -104,6 +110,31 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual((core.calls, product.calls), (1, 0))
         self.assertIn("Company fact", chat.prompts[0])
         self.assertNotIn("Product fact", chat.prompts[0])
+
+    def test_jev_adapter_sends_choice_question_to_openrouter(self):
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"answers": {"intent": {"type": "choice", "choice": "user_core", "confidence": 0.9}}}
+
+        class HTTP:
+            def __init__(self):
+                self.request = None
+
+            def post(self, url, **kwargs):
+                self.request = (url, kwargs)
+                return Response()
+
+        router = JevRouter(api_key="test-key")
+        router.http = HTTP()
+        state = {"current_query": "Where do you operate?", "recent_conversation": []}
+        result = router.predict(state, QUESTIONS)
+        url, kwargs = router.http.request
+        self.assertEqual(url, DECISIONS_URL)
+        self.assertEqual(kwargs["json"], {"model": JEV_MODEL, "state": state, "questions": QUESTIONS})
+        self.assertEqual(result["answers"]["intent"]["choice"], "user_core")
 
 
 if __name__ == "__main__":

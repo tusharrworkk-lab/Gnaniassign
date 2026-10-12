@@ -16,8 +16,8 @@ The CLI uses placeholder knowledge and will say when company or product facts ar
 ## LLM flow
 
 1. `TurnSession` collects final STT phrases and waits for end of turn. Text callers can use `ask(query)`.
-2. Jev receives the current query plus at most two compressed recent turns and selects one of six intents: `user_core`, `user_operations`, `user_timeline`, `product_what`, `product_why`, or `product_when`.
-3. If the strongest intent score is below `INTENT_THRESHOLD` (default `0.5`), the graph asks a clarification without a chat-model call.
+2. Jev receives structured state with the current query and at most two compressed recent turns. One `choice` question selects among six intents (`user_core`, `user_operations`, `user_timeline`, `product_what`, `product_why`, `product_when`) and `other`.
+3. If Jev selects `other` or its Choice confidence is below `INTENT_THRESHOLD` (default `0.5`), the graph asks a clarification without a chat-model call. Tune this threshold using labeled queries from the actual use case.
 4. The selected agent gets a maximum of four relevant memory summaries and up to four approved retrieval chunks from its own intent collection. Its single chat completion produces both the spoken answer and the new summary.
 
 Conversation history is in memory per `TurnSession` and is capped at 100 turns. There is no persistent cross-session memory or concrete vector database adapter yet. The `IntentScopedRetriever` interface accepts one store per intent and can be backed by collections or namespaces in a vector database.

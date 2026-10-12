@@ -27,17 +27,20 @@ class TurnState(TypedDict):
 
 
 def select_intent(answers: dict[str, Any], threshold: float = THRESHOLD) -> str:
-    """Choose one route; ask for clarification if Jev is uncertain."""
+    """Route Jev's Choice result, using its separate confidence value."""
     if not 0 <= threshold <= 1:
         raise ValueError("Intent threshold must be between 0 and 1")
     try:
-        scores = {name: float(answers[name]["noul"]) for name in INTENT_KEYS}
+        decision = answers["intent"]
+        choice = decision["choice"]
+        confidence = float(decision["confidence"])
     except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("Jev response is missing a valid score for an intent") from exc
-    if any(not isfinite(score) or not 0 <= score <= 1 for score in scores.values()):
-        raise ValueError("Jev intent scores must be finite numbers between 0 and 1")
-    best = max(scores, key=scores.__getitem__)
-    return best if scores[best] >= threshold else "clarify"
+        raise ValueError("Jev response is missing a valid intent choice or confidence") from exc
+    if not isfinite(confidence) or not 0 <= confidence <= 1:
+        raise ValueError("Jev intent confidence must be between 0 and 1")
+    if choice not in (*INTENT_KEYS, "other"):
+        raise ValueError(f"Jev returned an unknown intent choice: {choice!r}")
+    return choice if choice != "other" and confidence >= threshold else "clarify"
 
 
 def build_graph(router: IntentRouter, agents: dict[str, SubAgent], threshold: float = THRESHOLD):
@@ -48,9 +51,11 @@ def build_graph(router: IntentRouter, agents: dict[str, SubAgent], threshold: fl
         raise ValueError("Intent threshold must be between 0 and 1")
 
     def classify(state: TurnState) -> dict[str, Any]:
-        recent = render_memory(state["history"][-2:])
-        decision_context = f"Recent conversation:\n{recent}\nCurrent user query: {state['text']}"
-        answers = router.predict(decision_context, QUESTIONS, model="jev")["answers"]
+        decision_context = {
+            "recent_conversation": [turn.summary[:320] for turn in state["history"][-2:]],
+            "current_query": state["text"],
+        }
+        answers = router.predict(decision_context, QUESTIONS)["answers"]
         intent = select_intent(answers, threshold)
         topic = topic_from_query(state["text"])
         if topic == "general" and state["history"] and state["history"][-1].intent == intent:

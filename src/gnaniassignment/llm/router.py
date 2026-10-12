@@ -20,7 +20,7 @@ class JevRouter:
         self.last_ms = 0.0
         self.http = requests.Session()
 
-    def predict(self, state: str, questions: dict[str, Any], model: str | None = None) -> dict[str, Any]:
+    def predict(self, state: str | dict[str, Any], questions: dict[str, Any], model: str | None = None) -> dict[str, Any]:
         started = time.perf_counter()
         try:
             response = self.http.post(

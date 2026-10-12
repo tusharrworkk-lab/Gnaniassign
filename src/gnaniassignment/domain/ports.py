@@ -6,5 +6,5 @@ from typing import Any, Protocol
 
 
 class IntentRouter(Protocol):
-    def predict(self, state: str, questions: dict[str, Any], model: str | None = None) -> dict[str, Any]:
-        """Return intent scores using the common ``answers`` response shape."""
+    def predict(self, state: str | dict[str, Any], questions: dict[str, Any], model: str | None = None) -> dict[str, Any]:
+        """Return Jev's typed answers for the supplied state and questions."""

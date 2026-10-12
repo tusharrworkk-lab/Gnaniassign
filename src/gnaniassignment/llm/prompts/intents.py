@@ -1,4 +1,4 @@
-"""The six mutually exclusive intents used by the enquiry assistant."""
+"""One Jev Choice question for the assistant's primary intent."""
 
 INTENT_KEYS = (
     "user_core",
@@ -10,16 +10,17 @@ INTENT_KEYS = (
 )
 
 QUESTIONS = {
-    "user_core": {
-        "type": "noul",
-        "instructions": "Is this a core user/company question about what it is, why it exists, or where it operates? Examples: 'what do you do?', 'why were you founded?', 'where do you operate?'.",
+    "intent": {
+        "type": "choice",
+        "instructions": "What is the primary intent of `current_query`? Use `recent_conversation` only to resolve references and follow-up questions. Choose one option.",
+        "criteria": {
+            "user_core": "A question about what the company or person does, why it exists, or where it operates.",
+            "user_operations": "A question about how the company or person works: process, delivery, support, or implementation.",
+            "user_timeline": "A question about when the company or person starts, becomes available, or completes work.",
+            "product_what": "A question about what a product is or does, its features, compatibility, or price.",
+            "product_why": "A question about why to choose a product, its benefits, value, fit, or comparisons.",
+            "product_when": "A question about when a product launches, is available, is delivered, renewed, or supported.",
+            "other": "The current query cannot be assigned to any of these categories, even with recent conversation context.",
+        },
     },
-    "user_operations": {
-        "type": "noul",
-        "instructions": "Is this a user/company operational question about how it works, process, delivery, support, or implementation?",
-    },
-    "user_timeline": {"type": "noul", "instructions": "Is this a user/company timeline question: when something starts, is available, launches, or is completed?"},
-    "product_what": {"type": "noul", "instructions": "Is this a product enquiry asking what a product is, its features, capabilities, compatibility, or pricing?"},
-    "product_why": {"type": "noul", "instructions": "Is this a product enquiry asking why to use it, its value, benefits, or comparison?"},
-    "product_when": {"type": "noul", "instructions": "Is this a product enquiry asking when it launches, is available, will be delivered, renewed, or supported?"},
 }
