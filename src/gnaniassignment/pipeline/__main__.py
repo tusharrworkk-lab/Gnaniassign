@@ -1,29 +1,22 @@
-"""Two locked phrases, then the pause. Uses the local Laya checkpoint."""
+"""Minimal CLI demonstration of the enquiry LLM pipeline."""
 
 from __future__ import annotations
 
-from gnaniassignment.pipeline.agents import default_agents
-from gnaniassignment.pipeline.graph import build_graph, load_laya
-from gnaniassignment.pipeline.session import TurnSession
+from gnaniassignment.app.container import create_session
 
 
 def _show(label: str, result: dict) -> None:
-    draft = result.get("draft") or {}
     print(
-        f"{label}: text={draft.get('text')!r} "
-        f"intents={draft.get('intents')} slots={draft.get('slots')} "
-        f"reused={result.get('reused')} spoken={result.get('spoken')!r}"
+        f"{label}: intent={result.get('intent')!r} topic={result.get('topic')!r} "
+        f"spoken={result.get('spoken')!r}"
     )
 
 
 def main() -> None:
-    agents = default_agents()
-    session = TurnSession(build_graph(load_laya(), agents))
+    session = create_session()
 
-    _show("final 1", session.feed_final("book a meeting"))
-    _show("final 2", session.feed_final("on Thursday"))
+    _show("final 1", session.feed_final("Where do you operate?"))
     _show("pause", session.feed_end())
-    print(f"meeting agent calls: {agents['book_meeting'].calls}")
 
 
 if __name__ == "__main__":

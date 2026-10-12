@@ -7,7 +7,12 @@ authors = [
     { name = "tusharrworkk-lab", email = "tusharrworkk@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "langgraph",
+    "laya",
+    "requests",
+    "torch",
+]
 
 [project.scripts]
 gnaniassignment = "gnaniassignment:main"
