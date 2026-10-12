@@ -21,8 +21,9 @@ class TurnSession:
         text = " ".join(self.phrases)
         self.phrases = []
         result = self.graph.invoke({"text": text, "answers": {}, "intent": "", "topic": "", "history": self.history, "memory": "", "replies": [], "spoken": None})
-        reply = result["replies"][0]["text"]
-        self.history.append(ChatTurn(query=text, answer=reply, intent=result["intent"], topic=result["topic"]))
+        reply_data = result["replies"][0]
+        reply = reply_data["text"]
+        self.history.append(ChatTurn(query=text, answer=reply, summary=reply_data["summary"], intent=result["intent"], topic=result["topic"]))
         return result
 
     def ask(self, query: str) -> dict[str, Any]:

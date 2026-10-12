@@ -9,6 +9,7 @@ from dataclasses import dataclass
 class ChatTurn:
     query: str
     answer: str
+    summary: str
     intent: str
     topic: str
 
@@ -62,4 +63,4 @@ def select_memory(history: list[ChatTurn], intent: str, topic: str) -> list[Chat
 def render_memory(turns: list[ChatTurn]) -> str:
     if not turns:
         return "No prior conversation is relevant."
-    return "\n".join(f"User: {turn.query}\nAssistant: {turn.answer}" for turn in turns)
+    return "\n".join(f"Memory: {turn.summary}" for turn in turns)

@@ -7,7 +7,7 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from gnaniassignment.domain.ports import IntentRouter
-from gnaniassignment.llm.agents import SubAgent
+from gnaniassignment.llm.agents import AgentResponse, SubAgent
 from gnaniassignment.llm.memory import ChatTurn, render_memory, select_memory, topic_from_query
 from gnaniassignment.llm.prompts.intents import INTENT_KEYS, QUESTIONS
 
@@ -62,7 +62,9 @@ def build_graph(router: IntentRouter, agents: dict[str, SubAgent], threshold: fl
 
 def _agent_node(agent: SubAgent):
     def node(state: TurnState) -> dict[str, Any]:
-        answer = agent.run(state["text"], {"intent": state["intent"], "topic": state["topic"]}, state["memory"])
-        return {"replies": [{"agent": agent.name, "text": answer}]}
+        output = agent.run(state["text"], {"intent": state["intent"], "topic": state["topic"]}, state["memory"])
+        if isinstance(output, AgentResponse):
+            return {"replies": [{"agent": agent.name, "text": output.answer, "summary": output.memory_summary}]}
+        return {"replies": [{"agent": agent.name, "text": output, "summary": f"User asked: {state['text']}. Answer: {output[:280]}"}]}
 
     return node
