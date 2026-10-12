@@ -1,5 +1,3 @@
-"""Intent questions for the decision model."""
-
 """The six mutually exclusive intents used by the enquiry assistant."""
 
 INTENT_KEYS = (

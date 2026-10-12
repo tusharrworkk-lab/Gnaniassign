@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from math import isfinite
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -26,20 +27,34 @@ class TurnState(TypedDict):
 
 
 def select_intent(answers: dict[str, Any], threshold: float = THRESHOLD) -> str:
-    """Pick exactly one route, so a query triggers only one subagent call."""
-    scores = {name: float(answers[name]["noul"]) for name in INTENT_KEYS}
-    return max(scores, key=scores.__getitem__)
+    """Choose one route; ask for clarification if Jev is uncertain."""
+    if not 0 <= threshold <= 1:
+        raise ValueError("Intent threshold must be between 0 and 1")
+    try:
+        scores = {name: float(answers[name]["noul"]) for name in INTENT_KEYS}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Jev response is missing a valid score for an intent") from exc
+    if any(not isfinite(score) or not 0 <= score <= 1 for score in scores.values()):
+        raise ValueError("Jev intent scores must be finite numbers between 0 and 1")
+    best = max(scores, key=scores.__getitem__)
+    return best if scores[best] >= threshold else "clarify"
 
 
 def build_graph(router: IntentRouter, agents: dict[str, SubAgent], threshold: float = THRESHOLD):
     missing = set(INTENT_KEYS) - set(agents)
     if missing:
         raise ValueError(f"Missing agents for intents: {', '.join(sorted(missing))}")
+    if not 0 <= threshold <= 1:
+        raise ValueError("Intent threshold must be between 0 and 1")
 
     def classify(state: TurnState) -> dict[str, Any]:
-        answers = router.predict(f"user query: {state['text']}", QUESTIONS, model="jev")["answers"]
+        recent = render_memory(state["history"][-2:])
+        decision_context = f"Recent conversation:\n{recent}\nCurrent user query: {state['text']}"
+        answers = router.predict(decision_context, QUESTIONS, model="jev")["answers"]
         intent = select_intent(answers, threshold)
         topic = topic_from_query(state["text"])
+        if topic == "general" and state["history"] and state["history"][-1].intent == intent:
+            topic = state["history"][-1].topic
         return {"answers": answers, "intent": intent, "topic": topic, "memory": render_memory(select_memory(state["history"], intent, topic))}
 
     def route(state: TurnState) -> str:
@@ -48,14 +63,20 @@ def build_graph(router: IntentRouter, agents: dict[str, SubAgent], threshold: fl
     def settle(state: TurnState) -> dict[str, Any]:
         return {"spoken": state["replies"][0]["text"]}
 
+    def clarify(state: TurnState) -> dict[str, Any]:
+        answer = "Could you clarify whether you mean the company or a product, and what you would like to know?"
+        return {"replies": [{"agent": "clarify", "text": answer, "summary": "The question was unclear; awaiting clarification."}]}
+
     graph = StateGraph(TurnState)
     graph.add_node("classify", classify)
+    graph.add_node("clarify", clarify)
     graph.add_node("settle", settle)
+    graph.add_edge("clarify", "settle")
     for name, agent in agents.items():
         graph.add_node(name, _agent_node(agent))
         graph.add_edge(name, "settle")
     graph.add_edge(START, "classify")
-    graph.add_conditional_edges("classify", route, list(agents))
+    graph.add_conditional_edges("classify", route, [*agents, "clarify"])
     graph.add_edge("settle", END)
     return graph.compile()
 

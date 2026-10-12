@@ -15,11 +15,13 @@ class VectorStore(Protocol):
 
 class IntentScopedRetriever:
     def __init__(self, stores: dict[str, VectorStore]) -> None:
-        self.stores = stores
+        self.stores = dict(stores)
 
     def retrieve(self, intent: str, query: str, limit: int = 4) -> list[str]:
+        if limit < 1:
+            raise ValueError("Retrieval limit must be positive")
         store = self.stores.get(intent)
-        return store.search(query, limit=limit) if store else []
+        return store.search(query, limit=limit)[:limit] if store else []
 
 
 class EmptyRetriever:

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
+
+MAX_MEMORY_TURNS = 4
+MAX_SUMMARY_CHARS = 320
 
 
 @dataclass(frozen=True)
@@ -20,15 +24,15 @@ def topic_from_query(query: str) -> str:
     It makes follow-ups such as 'where do you operate?' and 'which regions?'
     share a memory bucket without another model call.
     """
-    lowered = query.lower()
+    tokens = set(re.findall(r"[\w]+", query.casefold()))
     groups = {
-        "coverage": ("where", "region", "country", "operate", "location"),
-        "timeline": ("when", "launch", "available", "delivery", "roadmap", "date"),
-        "operations": ("how", "process", "work", "support", "implement"),
-        "value": ("why", "benefit", "value", "choose", "comparison"),
-        "product": ("product", "feature", "capability", "price", "plan"),
+        "coverage": {"where", "region", "regions", "country", "countries", "operate", "location", "locations"},
+        "timeline": {"when", "launch", "available", "delivery", "roadmap", "date"},
+        "operations": {"how", "process", "work", "support", "implement"},
+        "value": {"why", "benefit", "benefits", "value", "choose", "comparison"},
+        "product": {"product", "products", "feature", "features", "capability", "price", "plan"},
     }
-    return next((name for name, words in groups.items() if any(word in lowered for word in words)), "general")
+    return next((name for name, words in groups.items() if tokens & words), "general")
 
 
 def select_memory(history: list[ChatTurn], intent: str, topic: str) -> list[ChatTurn]:
@@ -46,21 +50,21 @@ def select_memory(history: list[ChatTurn], intent: str, topic: str) -> list[Chat
     if len(same_intent_run) >= 3:
         return list(reversed(same_intent_run[:3]))
 
-    selected: list[ChatTurn] = []
-    for turn in reversed(history):
+    selected_indices: set[int] = set()
+    for index in range(len(history) - 1, -1, -1):
+        turn = history[index]
         if turn.intent == intent and turn.topic == topic:
-            selected.append(turn)
-        if len(selected) == 2:
+            selected_indices.add(index)
+        if len(selected_indices) == 2:
             break
-    for turn in reversed(history):
-        if turn not in selected:
-            selected.append(turn)
-        if len(selected) == 4:
+    for index in range(len(history) - 1, -1, -1):
+        selected_indices.add(index)
+        if len(selected_indices) == MAX_MEMORY_TURNS:
             break
-    return list(reversed(selected))
+    return [history[index] for index in sorted(selected_indices)]
 
 
 def render_memory(turns: list[ChatTurn]) -> str:
     if not turns:
         return "No prior conversation is relevant."
-    return "\n".join(f"Memory: {turn.summary}" for turn in turns)
+    return "\n".join(f"Memory: {turn.summary[:MAX_SUMMARY_CHARS]}" for turn in turns)

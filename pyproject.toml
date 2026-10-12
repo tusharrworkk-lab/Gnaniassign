@@ -1,7 +1,7 @@
 [project]
 name = "gnaniassignment"
 version = "0.1.0"
-description = "Add your description here"
+description = "Intent-routed enquiry assistant with compressed conversational memory"
 readme = "README.md"
 authors = [
     { name = "tusharrworkk-lab", email = "tusharrworkk@gmail.com" }
@@ -9,10 +9,12 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "langgraph",
-    "laya",
     "requests",
-    "torch",
 ]
+
+[project.optional-dependencies]
+local-laya = ["laya", "torch"]
+transformers-experiment = ["transformers", "accelerate", "torch"]
 
 [project.scripts]
 gnaniassignment = "gnaniassignment:main"

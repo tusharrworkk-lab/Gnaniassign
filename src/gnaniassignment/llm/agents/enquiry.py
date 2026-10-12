@@ -9,6 +9,9 @@ from gnaniassignment.llm.chat import ChatModel
 from gnaniassignment.llm.prompts.enquiry_agents import PROMPTS
 from gnaniassignment.llm.retrieval import EmptyRetriever, IntentScopedRetriever
 
+MAX_KNOWLEDGE_CHARS = 6000
+MAX_SUMMARY_CHARS = 320
+
 
 class EnquiryAgent(SubAgent):
     def __init__(self, name: str, model: ChatModel, knowledge: str = "No approved knowledge has been loaded yet.", retriever: IntentScopedRetriever | EmptyRetriever | None = None) -> None:
@@ -17,22 +20,27 @@ class EnquiryAgent(SubAgent):
         self.system_prompt = PROMPTS[name]
 
     def reply(self, text: str, slots: dict[str, str], memory: str = "") -> AgentResponse:
-        retrieved = self.retriever.retrieve(self.name, text)
-        knowledge = "\n\n".join(retrieved) or self.knowledge
+        retrieved = self.retriever.retrieve(self.name, text, limit=4)
+        knowledge = ("\n\n".join(retrieved) or self.knowledge)[:MAX_KNOWLEDGE_CHARS]
         user_prompt = f"Approved knowledge:\n{knowledge}\n\nRelevant conversation:\n{memory}\n\nCurrent user query:\n{text}"
         raw = self.model.complete(self.system_prompt, user_prompt)
         try:
             payload = json.loads(raw)
-            answer = str(payload["answer"]).strip()
-            summary = str(payload["memory_summary"]).strip()
+            if not isinstance(payload, dict) or not isinstance(payload.get("answer"), str) or not isinstance(payload.get("memory_summary"), str):
+                raise ValueError("Invalid response fields")
+            answer = payload["answer"].strip()
+            summary = payload["memory_summary"].strip()[:MAX_SUMMARY_CHARS]
             if answer and summary:
                 return AgentResponse(answer=answer, memory_summary=summary)
-        except (json.JSONDecodeError, KeyError, TypeError):
-            pass
-        # A malformed model response still remains useful, while ensuring the
-        # stored context is shorter than the original request/response pair.
+        except (json.JSONDecodeError, ValueError):
+            if raw.lstrip().startswith("{"):
+                raise ValueError("Subagent returned malformed JSON") from None
+        # Some small models may return plain text despite the requested format.
         answer = raw.strip()
-        return AgentResponse(answer=answer, memory_summary=f"User asked: {text}. Answer: {answer[:280]}")
+        if not answer:
+            raise ValueError("Subagent returned an empty answer")
+        summary = f"User asked: {text[:120]}. Answer: {answer[:180]}"
+        return AgentResponse(answer=answer, memory_summary=summary[:MAX_SUMMARY_CHARS])
 
 
 def enquiry_agents(model: ChatModel, knowledge: str = "No approved knowledge has been loaded yet.", retriever: IntentScopedRetriever | EmptyRetriever | None = None) -> dict[str, SubAgent]:

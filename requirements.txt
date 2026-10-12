@@ -1,6 +1,1 @@
-transformers
-accelerate
-torch
-laya
-langgraph
-langchain-core
+-e .
