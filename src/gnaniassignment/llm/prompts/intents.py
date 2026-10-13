@@ -1,4 +1,4 @@
-"""One Jev Choice question for the assistant's primary intent."""
+"""One Laya Choice question for the assistant's primary intent."""
 
 INTENT_KEYS = (
     "user_core",

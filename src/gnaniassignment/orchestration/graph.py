@@ -27,7 +27,7 @@ class TurnState(TypedDict):
 
 
 def select_intent(answers: dict[str, Any], threshold: float = THRESHOLD) -> str:
-    """Route Jev's Choice result, using its separate confidence value."""
+    """Route Laya's Choice result, using its separate confidence value."""
     if not 0 <= threshold <= 1:
         raise ValueError("Intent threshold must be between 0 and 1")
     try:
@@ -35,11 +35,11 @@ def select_intent(answers: dict[str, Any], threshold: float = THRESHOLD) -> str:
         choice = decision["choice"]
         confidence = float(decision["confidence"])
     except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("Jev response is missing a valid intent choice or confidence") from exc
+        raise ValueError("Laya response is missing a valid intent choice or confidence") from exc
     if not isfinite(confidence) or not 0 <= confidence <= 1:
-        raise ValueError("Jev intent confidence must be between 0 and 1")
+        raise ValueError("Laya intent confidence must be between 0 and 1")
     if choice not in (*INTENT_KEYS, "other"):
-        raise ValueError(f"Jev returned an unknown intent choice: {choice!r}")
+        raise ValueError(f"Laya returned an unknown intent choice: {choice!r}")
     return choice if choice != "other" and confidence >= threshold else "clarify"
 
 

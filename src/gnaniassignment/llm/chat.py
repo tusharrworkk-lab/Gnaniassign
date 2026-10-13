@@ -1,13 +1,13 @@
-"""Low-latency OpenRouter chat completion adapter for subagents."""
+"""OpenRouter Python SDK adapter for intent-specific response agents."""
 
 from __future__ import annotations
 
 import os
-from typing import Any, Protocol
+from typing import Protocol
 
-import requests
+from openrouter import OpenRouter
 
-OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_SUBAGENT_MODEL = "meta-llama/llama-3.1-8b-instruct"
 
 
 class ChatModel(Protocol):
@@ -15,20 +15,28 @@ class ChatModel(Protocol):
 
 
 class OpenRouterChatModel:
-    """Minimal HTTP client; one request per completed user turn."""
+    """One reusable SDK client for all completed turns in a session."""
 
-    def __init__(self, model: str | None = None, api_key: str | None = None) -> None:
-        self.model = model or os.environ["SUBAGENT_MODEL"]
-        self.api_key = api_key or os.environ["OPENROUTER_API_KEY"]
-        self.http = requests.Session()
+    def __init__(self, model: str | None = None, api_key: str | None = None, client: OpenRouter | None = None) -> None:
+        self.model = model or os.getenv("SUBAGENT_MODEL") or DEFAULT_SUBAGENT_MODEL
+        if client is not None:
+            self.client = client
+        else:
+            key = api_key or os.environ["OPENROUTER_API_KEY"]
+            self.client = OpenRouter(api_key=key)
 
     def complete(self, system: str, user: str) -> str:
-        response = self.http.post(
-            OPENROUTER_CHAT_URL,
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            json={"model": self.model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}], "temperature": 0.2, "max_tokens": 220},
-            timeout=20,
+        response = self.client.chat.send(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.2,
+            max_tokens=220,
+            timeout_ms=20_000,
         )
-        response.raise_for_status()
-        body: dict[str, Any] = response.json()
-        return body["choices"][0]["message"]["content"].strip()
+        content = response.choices[0].message.content
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("OpenRouter returned an empty text response")
+        return content.strip()

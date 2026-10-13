@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from gnaniassignment.llm.agents.enquiry import enquiry_agents
+from gnaniassignment.llm.chat import DEFAULT_SUBAGENT_MODEL, OpenRouterChatModel
 from gnaniassignment.llm.memory import ChatTurn, render_memory, select_memory, topic_from_query
 from gnaniassignment.llm.prompts.intents import QUESTIONS
 from gnaniassignment.llm.retrieval import IntentScopedRetriever
-from gnaniassignment.llm.router import DECISIONS_URL, JEV_MODEL, JevRouter
+from gnaniassignment.llm.router import LAYA_GATEWAY_URL, LAYA_MODEL, LayaGatewayRouter
 from gnaniassignment.orchestration.graph import build_graph, select_intent
 from gnaniassignment.orchestration.session import TurnSession
 
@@ -81,7 +83,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(render_memory(selected).count("Memory:"), 4)
         self.assertEqual(topic_from_query("Somewhere else?"), "general")
 
-    def test_invalid_jev_confidence_is_rejected(self):
+    def test_invalid_laya_confidence_is_rejected(self):
         scores = {"intent": {"choice": "user_core", "confidence": float("nan")}}
         with self.assertRaises(ValueError):
             select_intent(scores)
@@ -111,7 +113,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Company fact", chat.prompts[0])
         self.assertNotIn("Product fact", chat.prompts[0])
 
-    def test_jev_adapter_sends_choice_question_to_openrouter(self):
+    def test_laya_adapter_sends_choice_question_to_vercel(self):
         class Response:
             def raise_for_status(self):
                 return None
@@ -127,14 +129,35 @@ class PipelineTests(unittest.TestCase):
                 self.request = (url, kwargs)
                 return Response()
 
-        router = JevRouter(api_key="test-key")
+        router = LayaGatewayRouter(api_key="test-key")
         router.http = HTTP()
         state = {"current_query": "Where do you operate?", "recent_conversation": []}
         result = router.predict(state, QUESTIONS)
         url, kwargs = router.http.request
-        self.assertEqual(url, DECISIONS_URL)
-        self.assertEqual(kwargs["json"], {"model": JEV_MODEL, "state": state, "questions": QUESTIONS})
+        self.assertEqual(url, LAYA_GATEWAY_URL)
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer test-key")
+        self.assertEqual(kwargs["json"], {"model": LAYA_MODEL, "state": state, "questions": QUESTIONS})
         self.assertEqual(result["answers"]["intent"]["choice"], "user_core")
+
+    def test_llama_subagent_uses_openrouter_sdk(self):
+        class ChatResource:
+            def __init__(self):
+                self.request = None
+
+            def send(self, **kwargs):
+                self.request = kwargs
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="  Answer  "))])
+
+        resource = ChatResource()
+        client = SimpleNamespace(chat=resource)
+        model = OpenRouterChatModel(model=DEFAULT_SUBAGENT_MODEL, client=client)
+        self.assertEqual(model.complete("System instructions", "User query"), "Answer")
+        self.assertEqual(resource.request["model"], "meta-llama/llama-3.1-8b-instruct")
+        self.assertEqual(resource.request["messages"], [
+            {"role": "system", "content": "System instructions"},
+            {"role": "user", "content": "User query"},
+        ])
+        self.assertEqual(resource.request["timeout_ms"], 20_000)
 
 
 if __name__ == "__main__":
