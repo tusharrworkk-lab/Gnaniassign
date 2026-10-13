@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from gnaniassignment.app.config import Settings
+from gnaniassignment.app.config import Settings, load_environment
 from gnaniassignment.llm.agents.enquiry import enquiry_agents
 from gnaniassignment.llm.chat import OpenRouterChatModel
 from gnaniassignment.llm.router import LayaGatewayRouter
@@ -16,6 +16,7 @@ def create_session(
     retriever: IntentScopedRetriever | EmptyRetriever | None = None,
     knowledge: str = "No approved knowledge has been loaded yet.",
 ) -> TurnSession:
+    load_environment()
     settings = settings or Settings.from_environment()
     if settings.intent_provider == "laya":
         router = LayaGatewayRouter()

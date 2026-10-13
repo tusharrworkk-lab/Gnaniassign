@@ -22,7 +22,9 @@ class OpenRouterChatModel:
         if client is not None:
             self.client = client
         else:
-            key = api_key or os.environ["OPENROUTER_API_KEY"]
+            key = api_key or os.getenv("OPENROUTER_API_KEY")
+            if not key:
+                raise ValueError("Set OPENROUTER_API_KEY in .env or your environment")
             self.client = OpenRouter(api_key=key)
 
     def complete(self, system: str, user: str) -> str:

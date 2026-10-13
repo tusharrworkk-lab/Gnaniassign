@@ -4,7 +4,7 @@ An intent-routed enquiry assistant. The current implementation accepts text or c
 
 ## Run
 
-Python 3.12 or newer is required. Install with `uv sync`, then set `AI_GATEWAY_API_KEY` for Laya and `OPENROUTER_API_KEY` for the response subagents in your environment. The subagents use `meta-llama/llama-3.1-8b-instruct` through OpenRouter by default. `SUBAGENT_MODEL` optionally overrides that model ID.
+Python 3.12 or newer is required. Install with `uv sync`, then fill in `AI_GATEWAY_API_KEY` and `OPENROUTER_API_KEY` in the root `.env` file. The app loads that file automatically and does not override variables already set in your shell. `LAYA_GATEWAY_URL` and `LAYA_MODEL` configure the Laya endpoint and model. The subagents use `meta-llama/llama-3.1-8b-instruct` through OpenRouter by default; `SUBAGENT_MODEL` optionally overrides that model ID. `.env` is ignored by Git; `.env.example` records the expected variable names.
 
 ```bash
 uv run gnaniassignment

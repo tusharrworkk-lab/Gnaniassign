@@ -16,7 +16,11 @@ class LayaGatewayRouter:
     """Route typed Choice questions to Laya through Vercel AI Gateway."""
 
     def __init__(self, api_key: str | None = None) -> None:
-        self.api_key = api_key or os.environ["AI_GATEWAY_API_KEY"]
+        self.api_key = api_key or os.getenv("AI_GATEWAY_API_KEY")
+        if not self.api_key:
+            raise ValueError("Set AI_GATEWAY_API_KEY in .env or your environment")
+        self.gateway_url = os.getenv("LAYA_GATEWAY_URL") or LAYA_GATEWAY_URL
+        self.model = os.getenv("LAYA_MODEL") or LAYA_MODEL
         self.last_ms = 0.0
         self.http = requests.Session()
 
@@ -24,9 +28,9 @@ class LayaGatewayRouter:
         started = time.perf_counter()
         try:
             response = self.http.post(
-                LAYA_GATEWAY_URL,
+                self.gateway_url,
                 headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                json={"model": model or LAYA_MODEL, "state": state, "questions": questions},
+                json={"model": model or self.model, "state": state, "questions": questions},
                 timeout=30,
             )
         finally:

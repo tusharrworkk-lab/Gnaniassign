@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import time
 
+from gnaniassignment.app.config import load_environment
 from gnaniassignment.llm.agents.enquiry import enquiry_agents
 from gnaniassignment.llm.chat import OpenRouterChatModel
 from gnaniassignment.llm.router import LayaGatewayRouter
@@ -13,6 +14,7 @@ from gnaniassignment.orchestration.session import TurnSession
 
 
 def main() -> None:
+    load_environment()
     query = " ".join(sys.argv[1:]).strip() or "Where do you operate?"
     router = LayaGatewayRouter()
     session = TurnSession(build_graph(router, enquiry_agents(OpenRouterChatModel())))
