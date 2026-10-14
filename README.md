@@ -34,6 +34,30 @@ uv run python -m gnaniassignment.pipeline.check --runs 10 "Where do you operate?
 
 The native route removes Python framework overhead, but it cannot guarantee a 25 ms single-query result on a GTX 1650 Ti. Measure its warm median against the current ~516 ms Python baseline before adopting it.
 
+## Local Gemma 3 1B with vLLM
+
+The retail BERT intent router remains local and chooses the specialist agent. Gemma is the local streamed answer model. vLLM exposes an OpenAI-compatible endpoint, so the pipeline measures its TTFT in exactly the same way as the Vercel fallback.
+
+First accept the Gemma licence on the [Google Gemma 3 1B model page](https://huggingface.co/google/gemma-3-1b-it), then authenticate Hugging Face in the same shell (or set `HF_TOKEN` in the ignored `.env`). Install the optional server dependency and start one persistent server:
+
+```bash
+uv sync --extra vllm
+uv run --extra vllm vllm serve google/gemma-3-1b-it \
+  --host 127.0.0.1 --port 8000 --api-key local-gemma \
+  --dtype float16 --gpu-memory-utilization 0.75 \
+  --max-model-len 2048 --max-num-seqs 1 --enforce-eager
+```
+
+This vLLM configuration requires a BF16-capable GPU (Ampere or newer). Gemma 3 is not supported in FP16 by vLLM due to numerical instability. The GTX 1650 Ti is a Turing GPU without BF16 support, so vLLM falls back to FP32 and cannot co-host the GPU retail BERT router; its experimental GGUF route also crashes in vLLM EngineCore on this hardware. Keep `LLM_PROVIDER=vercel` on this machine. To run Gemma locally on the GTX 1650 Ti, use a Q4 GGUF model with llama.cpp instead of vLLM. Keep any server process alive; loading per turn destroys the latency benefit.
+
+After the server reports ready, measure a warm end-to-end Hindi retail turn:
+
+```bash
+uv run python -m gnaniassignment.pipeline.check --runs 5 "मेरा ऑर्डर अभी तक डिलीवर नहीं हुआ"
+```
+
+The output separates the retail BERT routing time, Gemma first text chunk (TTFT), remaining stream time, and complete turn time. Only compare runs 2–5: the first request warms CUDA kernels and is not representative.
+
 ## Gnani realtime STT
 
 Install the official streaming client when you are ready to attach microphone or call audio:
@@ -45,6 +69,25 @@ uv sync --extra gnani-stt
 Set `GNANI_API_KEY` in `.env`. `GNANI_STT_LANGUAGE` defaults to `en-IN`; use `GNANI_STT_SAMPLE_RATE=8000` for narrowband telephony or `16000` for wideband audio. The adapter accepts only 1,024-byte signed-16-bit little-endian mono PCM frames, matching Gnani's realtime protocol. Send them at their natural realtime cadence rather than in bursts.
 
 `GnaniRealtimeStt` yields a final `GnaniTranscript` for each VAD-closed segment. `GnaniTurnBridge.handle()` immediately starts Laya and the selected subagent by default—the lowest-latency path. Use `handle_async()` from the WebSocket receiver so the synchronous LangGraph work does not block audio/event I/O. For a workflow that intentionally combines segments, construct the bridge with `auto_end_turn=False`, then call `end_turn()` explicitly. Gnani's `processing` event is useful to update the UI (for example, “transcribing…”), but it is not text and is never sent to Laya.
+
+## Reusable decision models
+
+`gnaniassignment.decision` is the low-latency replacement for zero-shot routing when a voice workflow has a fixed taxonomy. Each decision point has a versioned catalog, a separately versioned labelled JSONL dataset, and one generated model bundle. The engine is reusable across flows; do not mix unrelated labels (for example, enquiry and call-control intents) into one classifier.
+
+Each JSONL row requires `text` and `intent`; `language`, `source`, and `group_id` are strongly recommended. `group_id` keeps near-duplicate paraphrases in the same train/validation/test split. See `data/decision/enquiry-v1.example.jsonl` for the schema, but do not train production models from its tiny seed set. Collect roughly 300–500 genuine Hindi, Hinglish, English, and STT-noise examples per label, including a strong `other` class.
+
+Train a model bundle after labelling data:
+
+```bash
+uv sync --extra decision-model
+uv run python -m gnaniassignment.decision.train \
+  --catalog configs/decision/enquiry-v1.json \
+  --data data/decision/enquiry-v1.jsonl \
+  --output artifacts/enquiry-v1.joblib \
+  --threshold 0.65
+```
+
+The baseline combines word 1–2 grams with character 3–5 grams and uses multinomial logistic regression. It is designed for CPU inference in a few milliseconds and returns calibrated-enough probabilities for a clarification fallback. Evaluate against a held-out, group-separated test set before replacing the Laya route.
 
 For a device-verified Laya-only measurement, run `uv run --extra local-laya python -m gnaniassignment.pipeline.laya_benchmark --runs 10`. It verifies that model parameters are on the same CUDA device as Laya and synchronizes CUDA before and after every prediction, so the reported warm latency is not an asynchronous-timing artifact. For the fused CUDA path, install `uv sync --extra local-laya-fast`, then benchmark `--backend tilelang`. This is the preferred acceleration experiment for the Turing GPU; keep `eager` unless TileLang loads successfully and wins the warm median. For a GTX 1650 Ti, set `TILELANG_DEFAULT_TARGET='{"kind":"cuda","arch":"sm_75"}'` if automatic target detection fails. Do not use `compile` for this latency-sensitive single-request path because its start-up compilation can be substantial.
 

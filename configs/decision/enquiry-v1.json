@@ -1,0 +1,14 @@
+{
+  "name": "enquiry-intents",
+  "version": "v1",
+  "labels": [
+    "user_core",
+    "user_operations",
+    "user_timeline",
+    "product_what",
+    "product_why",
+    "product_when",
+    "other"
+  ],
+  "fallback_label": "other"
+}

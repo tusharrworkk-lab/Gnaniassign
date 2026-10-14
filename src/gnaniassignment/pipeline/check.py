@@ -6,11 +6,13 @@ import argparse
 import time
 
 from gnaniassignment.app.config import Settings, load_environment
-from gnaniassignment.app.container import create_intent_router
+from gnaniassignment.app.container import create_chat_model, create_intent_router
 from gnaniassignment.llm.agents.enquiry import enquiry_agents
-from gnaniassignment.llm.chat import VercelGatewayChatModel
+from gnaniassignment.llm.agents.retail import retail_agents
+from gnaniassignment.llm.chat import ChatModel
 from gnaniassignment.llm.laya_cpp import LayaCppRouter
 from gnaniassignment.llm.local_laya import LocalLayaRouter
+from gnaniassignment.llm.retail_classifier import HinglishRetailRouter
 from gnaniassignment.llm.router import LayaGatewayRouter
 from gnaniassignment.orchestration.graph import build_graph
 from gnaniassignment.orchestration.session import TurnSession
@@ -25,11 +27,13 @@ def main() -> None:
         parser.error("--runs must be at least 1")
     load_environment()
     query = " ".join(args.query).strip() or "Where do you operate?"
-    router = create_intent_router(Settings.from_environment())
+    settings = Settings.from_environment()
+    router = create_intent_router(settings)
     if isinstance(router, LocalLayaRouter):
         print(f"Local Laya load: {router.load_ms:.0f} ms (outside turn timing)")
-    model = VercelGatewayChatModel()
-    graph = build_graph(router, enquiry_agents(model))
+    model = create_chat_model(settings)
+    agents = retail_agents(model) if settings.intent_provider == "hinglish_retail" else enquiry_agents(model)
+    graph = build_graph(router, agents, threshold=settings.intent_threshold)
     for run in range(args.runs):
         if args.runs > 1:
             print(f"run {run + 1}/{args.runs}")
@@ -39,8 +43,8 @@ def main() -> None:
 
 def _run_turn(
     session: TurnSession,
-    router: LayaGatewayRouter | LocalLayaRouter | LayaCppRouter,
-    model: VercelGatewayChatModel,
+    router: LayaGatewayRouter | LocalLayaRouter | LayaCppRouter | HinglishRetailRouter,
+    model: ChatModel,
     query: str,
 ) -> None:
     model.last_first_token_ms = None
@@ -59,17 +63,17 @@ def _run_turn(
     print()
     elapsed_ms = (time.perf_counter() - started) * 1000
     print(f"intent: {result['intent']}  topic: {result['topic']}")
-    source = "local Python GPU" if isinstance(router, LocalLayaRouter) else "local laya.cpp" if isinstance(router, LayaCppRouter) else "gateway"
-    print(f"Laya {source}: {router.last_ms:.0f} ms")
+    source = "local Python GPU" if isinstance(router, LocalLayaRouter) else "local laya.cpp" if isinstance(router, LayaCppRouter) else "local retail BERT" if isinstance(router, HinglishRetailRouter) else "gateway"
+    print(f"Intent router {source}: {router.last_ms:.0f} ms")
     if isinstance(router, (LayaGatewayRouter, LayaCppRouter)) and router.last_headers_ms is not None:
         print(f"  until response headers: {router.last_headers_ms:.0f} ms")
         print(f"  body + JSON validation: {max(0, router.last_ms - router.last_headers_ms):.0f} ms")
     if model.last_first_token_ms is not None:
-        print(f"Vercel first text chunk: {model.last_first_token_ms:.0f} ms")
+        print(f"LLM first text chunk: {model.last_first_token_ms:.0f} ms")
     if model.last_stream_ms is not None:
         if model.last_first_token_ms is not None:
-            print(f"Vercel rest of stream: {model.last_stream_ms - model.last_first_token_ms:.0f} ms")
-        print(f"Vercel total: {model.last_stream_ms:.0f} ms")
+            print(f"LLM rest of stream: {model.last_stream_ms - model.last_first_token_ms:.0f} ms")
+        print(f"LLM total: {model.last_stream_ms:.0f} ms")
         print(f"other pipeline work: {max(0, elapsed_ms - router.last_ms - model.last_stream_ms):.0f} ms")
     if first_answer_ms is not None:
         print(f"first answer text: {first_answer_ms:.0f} ms")

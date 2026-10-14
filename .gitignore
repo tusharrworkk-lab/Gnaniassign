@@ -16,3 +16,6 @@ wheels/
 
 # Machine-specific native laya.cpp checkout, models and service scripts
 local/
+
+# Trained decision-model bundles are generated from versioned datasets.
+artifacts/

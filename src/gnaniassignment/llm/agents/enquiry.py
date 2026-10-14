@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Callable
+from typing import Callable, Mapping
 
 from gnaniassignment.llm.agents.base import AgentResponse, SubAgent
 from gnaniassignment.llm.chat import ChatModel
@@ -63,10 +63,10 @@ class _AnswerStream:
 
 
 class EnquiryAgent(SubAgent):
-    def __init__(self, name: str, model: ChatModel, knowledge: str = "No approved knowledge has been loaded yet.", retriever: IntentScopedRetriever | EmptyRetriever | None = None) -> None:
+    def __init__(self, name: str, model: ChatModel, knowledge: str = "No approved knowledge has been loaded yet.", retriever: IntentScopedRetriever | EmptyRetriever | None = None, prompts: Mapping[str, str] = PROMPTS) -> None:
         super().__init__()
         self.name, self.model, self.knowledge, self.retriever = name, model, knowledge, retriever or EmptyRetriever()
-        self.system_prompt = PROMPTS[name]
+        self.system_prompt = prompts[name]
 
     def reply(self, text: str, slots: dict[str, str], memory: str = "") -> AgentResponse:
         system_prompt, user_prompt = self._prompts(text, memory)

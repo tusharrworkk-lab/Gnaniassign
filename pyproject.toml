@@ -18,7 +18,10 @@ dependencies = [
 local-laya = ["laya", "torch"]
 local-laya-fast = ["laya[fast]", "torch"]
 gnani-stt = ["gnani-vachana"]
+decision-model = ["scikit-learn"]
 transformers-experiment = ["transformers", "accelerate", "torch"]
+retail-classifier = ["transformers", "torch"]
+vllm = ["vllm"]
 
 [project.scripts]
 gnaniassignment = "gnaniassignment:main"

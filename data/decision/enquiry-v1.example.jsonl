@@ -1,0 +1,14 @@
+{"text":"आपकी कंपनी कहाँ काम करती है?","intent":"user_core","language":"hi","source":"seed","group_id":"core-location-1"}
+{"text":"tumhari company kaha operate karti hai","intent":"user_core","language":"hinglish","source":"seed","group_id":"core-location-2"}
+{"text":"कंपनी काम कैसे करती है?","intent":"user_operations","language":"hi","source":"seed","group_id":"operations-1"}
+{"text":"support process kaise hota hai","intent":"user_operations","language":"hinglish","source":"seed","group_id":"operations-2"}
+{"text":"कंपनी की सेवा कब शुरू होगी?","intent":"user_timeline","language":"hi","source":"seed","group_id":"timeline-1"}
+{"text":"service kab available hogi","intent":"user_timeline","language":"hinglish","source":"seed","group_id":"timeline-2"}
+{"text":"यह उत्पाद क्या करता है?","intent":"product_what","language":"hi","source":"seed","group_id":"product-what-1"}
+{"text":"product ke features kya hain","intent":"product_what","language":"hinglish","source":"seed","group_id":"product-what-2"}
+{"text":"मुझे यह उत्पाद क्यों चुनना चाहिए?","intent":"product_why","language":"hi","source":"seed","group_id":"product-why-1"}
+{"text":"product use karne ka benefit kya hai","intent":"product_why","language":"hinglish","source":"seed","group_id":"product-why-2"}
+{"text":"उत्पाद कब मिलेगा?","intent":"product_when","language":"hi","source":"seed","group_id":"product-when-1"}
+{"text":"product delivery kab hogi","intent":"product_when","language":"hinglish","source":"seed","group_id":"product-when-2"}
+{"text":"नमस्ते","intent":"other","language":"hi","source":"seed","group_id":"other-1"}
+{"text":"tell me a joke","intent":"other","language":"en","source":"seed","group_id":"other-2"}

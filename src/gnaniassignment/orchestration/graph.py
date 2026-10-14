@@ -27,7 +27,7 @@ class TurnState(TypedDict):
     spoken: str | None
 
 
-def select_intent(answers: dict[str, Any], threshold: float = THRESHOLD) -> str:
+def select_intent(answers: dict[str, Any], threshold: float = THRESHOLD, allowed_intents: tuple[str, ...] = INTENT_KEYS) -> str:
     """Route Laya's Choice result, using its separate confidence value."""
     if not 0 <= threshold <= 1:
         raise ValueError("Intent threshold must be between 0 and 1")
@@ -39,15 +39,14 @@ def select_intent(answers: dict[str, Any], threshold: float = THRESHOLD) -> str:
         raise ValueError("Laya response is missing a valid intent choice or confidence") from exc
     if not isfinite(confidence) or not 0 <= confidence <= 1:
         raise ValueError("Laya intent confidence must be between 0 and 1")
-    if choice not in (*INTENT_KEYS, "other"):
-        raise ValueError(f"Laya returned an unknown intent choice: {choice!r}")
+    if choice not in (*allowed_intents, "other"):
+        raise ValueError(f"Intent router returned an unknown intent choice: {choice!r}")
     return choice if choice != "other" and confidence >= threshold else "clarify"
 
 
 def build_graph(router: IntentRouter, agents: dict[str, SubAgent], threshold: float = THRESHOLD):
-    missing = set(INTENT_KEYS) - set(agents)
-    if missing:
-        raise ValueError(f"Missing agents for intents: {', '.join(sorted(missing))}")
+    if not agents:
+        raise ValueError("At least one intent agent is required")
     if not 0 <= threshold <= 1:
         raise ValueError("Intent threshold must be between 0 and 1")
 
@@ -57,7 +56,7 @@ def build_graph(router: IntentRouter, agents: dict[str, SubAgent], threshold: fl
             "current_query": state["text"],
         }
         answers = router.predict(decision_context, QUESTIONS)["answers"]
-        intent = select_intent(answers, threshold)
+        intent = select_intent(answers, threshold, tuple(agents))
         topic = topic_from_query(state["text"])
         if topic == "general" and state["history"] and state["history"][-1].intent == intent:
             topic = state["history"][-1].topic
