@@ -1,6 +1,6 @@
 """Standalone experiment with Gnani's local causal model.
 
-The LLM enquiry pipeline uses OpenRouter. Run this module explicitly only when
+The LLM enquiry pipeline uses Vercel AI Gateway. Run this module explicitly only when
 the optional Transformers dependencies and model resources are available.
 """
 

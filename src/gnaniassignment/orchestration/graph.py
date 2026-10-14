@@ -5,6 +5,7 @@ from __future__ import annotations
 from math import isfinite
 from typing import Any, TypedDict
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from gnaniassignment.domain.ports import IntentRouter
@@ -68,8 +69,11 @@ def build_graph(router: IntentRouter, agents: dict[str, SubAgent], threshold: fl
     def settle(state: TurnState) -> dict[str, Any]:
         return {"spoken": state["replies"][0]["text"]}
 
-    def clarify(state: TurnState) -> dict[str, Any]:
+    def clarify(state: TurnState, config: RunnableConfig) -> dict[str, Any]:
         answer = "Could you clarify whether you mean the company or a product, and what you would like to know?"
+        on_chunk = config.get("configurable", {}).get("on_answer_chunk")
+        if on_chunk is not None:
+            on_chunk(answer)
         return {"replies": [{"agent": "clarify", "text": answer, "summary": "The question was unclear; awaiting clarification."}]}
 
     graph = StateGraph(TurnState)
@@ -87,8 +91,13 @@ def build_graph(router: IntentRouter, agents: dict[str, SubAgent], threshold: fl
 
 
 def _agent_node(agent: SubAgent):
-    def node(state: TurnState) -> dict[str, Any]:
-        output = agent.run(state["text"], {"intent": state["intent"], "topic": state["topic"]}, state["memory"])
+    def node(state: TurnState, config: RunnableConfig) -> dict[str, Any]:
+        on_chunk = config.get("configurable", {}).get("on_answer_chunk")
+        slots = {"intent": state["intent"], "topic": state["topic"]}
+        if on_chunk is None:
+            output = agent.run(state["text"], slots, state["memory"])
+        else:
+            output = agent.run_stream(state["text"], slots, state["memory"], on_chunk)
         if isinstance(output, AgentResponse):
             return {"replies": [{"agent": agent.name, "text": output.answer, "summary": output.memory_summary}]}
         return {"replies": [{"agent": agent.name, "text": output, "summary": f"User asked: {state['text']}. Answer: {output[:280]}"}]}

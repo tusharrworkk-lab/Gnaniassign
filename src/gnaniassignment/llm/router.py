@@ -22,10 +22,12 @@ class LayaGatewayRouter:
         self.gateway_url = os.getenv("LAYA_GATEWAY_URL") or LAYA_GATEWAY_URL
         self.model = os.getenv("LAYA_MODEL") or LAYA_MODEL
         self.last_ms = 0.0
+        self.last_headers_ms: float | None = None
         self.http = requests.Session()
 
     def predict(self, state: str | dict[str, Any], questions: dict[str, Any], model: str | None = None) -> dict[str, Any]:
         started = time.perf_counter()
+        self.last_headers_ms = None
         try:
             response = self.http.post(
                 self.gateway_url,
@@ -33,10 +35,13 @@ class LayaGatewayRouter:
                 json={"model": model or self.model, "state": state, "questions": questions},
                 timeout=30,
             )
+            elapsed = getattr(response, "elapsed", None)
+            if elapsed is not None:
+                self.last_headers_ms = elapsed.total_seconds() * 1000
+            response.raise_for_status()
+            body = response.json()
+            if not isinstance(body, dict) or not isinstance(body.get("answers"), dict):
+                raise RuntimeError("Laya response did not contain typed answers")
+            return body
         finally:
             self.last_ms = (time.perf_counter() - started) * 1000
-        response.raise_for_status()
-        body = response.json()
-        if not isinstance(body, dict) or not isinstance(body.get("answers"), dict):
-            raise RuntimeError("Laya response did not contain typed answers")
-        return body

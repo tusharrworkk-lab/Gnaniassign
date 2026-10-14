@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -24,3 +25,9 @@ class SubAgent:
     def run(self, text: str, slots: dict[str, str], memory: str = "") -> str | AgentResponse:
         self.calls += 1
         return self.reply(text, slots, memory)
+
+    def run_stream(self, text: str, slots: dict[str, str], memory: str, on_chunk: Callable[[str], None]) -> str | AgentResponse:
+        """Default streaming behavior for agents without a streaming model."""
+        output = self.run(text, slots, memory)
+        on_chunk(output.answer if isinstance(output, AgentResponse) else output)
+        return output

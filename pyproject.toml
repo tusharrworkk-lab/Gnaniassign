@@ -9,13 +9,14 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "langgraph",
-    "openrouter",
+    "openai",
     "python-dotenv",
     "requests",
 ]
 
 [project.optional-dependencies]
 local-laya = ["laya", "torch"]
+local-laya-fast = ["laya[fast]", "torch"]
 transformers-experiment = ["transformers", "accelerate", "torch"]
 
 [project.scripts]

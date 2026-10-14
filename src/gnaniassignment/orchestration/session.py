@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from gnaniassignment.llm.memory import ChatTurn
 
@@ -21,11 +21,12 @@ class TurnSession:
             self.phrases.append(phrase.strip())
         return {"spoken": None, "pending_text": " ".join(self.phrases)}
 
-    def feed_end(self) -> dict[str, Any]:
+    def feed_end(self, on_chunk: Callable[[str], None] | None = None) -> dict[str, Any]:
         if not self.phrases:
             return {"spoken": None, "replies": []}
         text = " ".join(self.phrases)
-        result = self.graph.invoke({"text": text, "answers": {}, "intent": "", "topic": "", "history": self.history, "memory": "", "replies": [], "spoken": None})
+        config = {"configurable": {"on_answer_chunk": on_chunk}} if on_chunk is not None else None
+        result = self.graph.invoke({"text": text, "answers": {}, "intent": "", "topic": "", "history": self.history, "memory": "", "replies": [], "spoken": None}, config=config)
         reply_data = result["replies"][0]
         reply = reply_data["text"]
         self.history.append(ChatTurn(query=text, answer=reply, summary=reply_data["summary"], intent=result["intent"], topic=result["topic"]))
@@ -38,3 +39,8 @@ class TurnSession:
         """Convenience entry point for one complete text-chat query."""
         self.feed_final(query)
         return self.feed_end()
+
+    def ask_stream(self, query: str, on_chunk: Callable[[str], None]) -> dict[str, Any]:
+        """Deliver answer text incrementally; return the completed turn."""
+        self.feed_final(query)
+        return self.feed_end(on_chunk=on_chunk)

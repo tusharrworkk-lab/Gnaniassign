@@ -6,13 +6,16 @@ import unittest
 from types import SimpleNamespace
 
 from gnaniassignment.llm.agents.enquiry import enquiry_agents
-from gnaniassignment.llm.chat import DEFAULT_SUBAGENT_MODEL, OpenRouterChatModel
+from gnaniassignment.llm.chat import DEFAULT_SUBAGENT_MODEL, VercelGatewayChatModel
 from gnaniassignment.llm.memory import ChatTurn, render_memory, select_memory, topic_from_query
+from gnaniassignment.llm.local_laya import LocalLayaRouter, require_requested_cuda
 from gnaniassignment.llm.prompts.intents import QUESTIONS
 from gnaniassignment.llm.retrieval import IntentScopedRetriever
 from gnaniassignment.llm.router import LAYA_GATEWAY_URL, LAYA_MODEL, LayaGatewayRouter
 from gnaniassignment.orchestration.graph import build_graph, select_intent
 from gnaniassignment.orchestration.session import TurnSession
+from gnaniassignment.pipeline.provider_benchmark import provider_from_event
+from gnaniassignment.pipeline.laya_benchmark import _same_execution_device
 
 
 class Router:
@@ -48,6 +51,32 @@ class Store:
 
 
 class PipelineTests(unittest.TestCase):
+    def test_laya_benchmark_treats_cuda_and_cuda_zero_as_same_device(self):
+        self.assertTrue(_same_execution_device("cuda", "cuda:0"))
+    def test_requested_cuda_fails_fast_when_runtime_is_unavailable(self):
+        import sys
+
+        original = sys.modules.get("torch")
+        unavailable_torch = SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: False),
+            version=SimpleNamespace(cuda="13.0"),
+        )
+        sys.modules["torch"] = unavailable_torch
+        try:
+            with self.assertRaisesRegex(RuntimeError, "cannot access an NVIDIA GPU"):
+                require_requested_cuda("cuda")
+        finally:
+            if original is None:
+                del sys.modules["torch"]
+            else:
+                sys.modules["torch"] = original
+
+    def test_provider_benchmark_reads_gateway_metadata(self):
+        event = {"provider_metadata": {"gateway": {"routing": {"finalProvider": "bedrock"}}}}
+        self.assertEqual(provider_from_event(event), "bedrock")
+        nested = {"choices": [{"delta": {"provider_metadata": {"gateway": {"routing": {"finalProvider": "novita"}}}}}]}
+        self.assertEqual(provider_from_event(nested), "novita")
+
     def test_low_confidence_clarifies_without_chat_call(self):
         router, chat = Router(confidence=0.2), Chat()
         session = TurnSession(build_graph(router, enquiry_agents(chat), threshold=0.5))
@@ -139,25 +168,75 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(kwargs["json"], {"model": LAYA_MODEL, "state": state, "questions": QUESTIONS})
         self.assertEqual(result["answers"]["intent"]["choice"], "user_core")
 
-    def test_llama_subagent_uses_openrouter_sdk(self):
+    def test_local_laya_adapter_uses_loaded_agent(self):
+        class Agent:
+            def predict(self, state, questions):
+                self.request = (state, questions)
+                return {"answers": {"intent": {"choice": "product_what", "confidence": 0.8}}}
+
+        agent = Agent()
+        router = LocalLayaRouter(agent=agent, model_id="convaiinnovations/laya", device="cuda")
+        state = {"current_query": "What does it do?", "recent_conversation": []}
+        result = router.predict(state, QUESTIONS)
+        self.assertEqual(agent.request, (state, QUESTIONS))
+        self.assertEqual(result["answers"]["intent"]["choice"], "product_what")
+        self.assertGreaterEqual(router.last_ms, 0)
+        with self.assertRaises(ValueError):
+            router.predict(state, QUESTIONS, model="different-checkpoint")
+
+    def test_llama_subagent_uses_vercel_gateway_client(self):
         class ChatResource:
             def __init__(self):
                 self.request = None
 
-            def send(self, **kwargs):
+            def create(self, **kwargs):
                 self.request = kwargs
                 return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="  Answer  "))])
 
         resource = ChatResource()
-        client = SimpleNamespace(chat=resource)
-        model = OpenRouterChatModel(model=DEFAULT_SUBAGENT_MODEL, client=client)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=resource))
+        model = VercelGatewayChatModel(model=DEFAULT_SUBAGENT_MODEL, client=client)
         self.assertEqual(model.complete("System instructions", "User query"), "Answer")
-        self.assertEqual(resource.request["model"], "meta-llama/llama-3.1-8b-instruct")
+        self.assertEqual(resource.request["model"], "meta/llama-3.1-8b")
         self.assertEqual(resource.request["messages"], [
             {"role": "system", "content": "System instructions"},
             {"role": "user", "content": "User query"},
         ])
-        self.assertEqual(resource.request["timeout_ms"], 20_000)
+        self.assertEqual(resource.request["max_tokens"], 220)
+
+    def test_vercel_stream_yields_only_text_deltas(self):
+        class ChatResource:
+            def create(self, **kwargs):
+                self.request = kwargs
+                return iter([
+                    SimpleNamespace(choices=[]),
+                    SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="Hello"))]),
+                    SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=" there"))]),
+                ])
+
+        resource = ChatResource()
+        model = VercelGatewayChatModel(client=SimpleNamespace(chat=SimpleNamespace(completions=resource)))
+        self.assertEqual(list(model.stream_complete("System", "User")), ["Hello", " there"])
+        self.assertIs(resource.request["stream"], True)
+
+    def test_session_streams_decoded_answer_and_stores_summary(self):
+        class StreamingChat:
+            def stream_complete(self, system, user):
+                for chunk in ['{"answer":"Hello \\', '"world\\".\\', 'nDone",', '"memory_summary":"Greeting saved."}']:
+                    yield chunk
+
+        session = TurnSession(build_graph(Router(), enquiry_agents(StreamingChat())))
+        chunks: list[str] = []
+        result = session.ask_stream("Greet me", chunks.append)
+        self.assertEqual("".join(chunks), 'Hello "world".\nDone')
+        self.assertEqual(result["spoken"], "".join(chunks))
+        self.assertEqual(session.history[0].summary, "Greeting saved.")
+
+    def test_clarification_is_delivered_to_stream_callback(self):
+        session = TurnSession(build_graph(Router(chosen="other"), enquiry_agents(Chat())))
+        chunks: list[str] = []
+        result = session.ask_stream("Unclear", chunks.append)
+        self.assertEqual(chunks, [result["spoken"]])
 
 
 if __name__ == "__main__":
