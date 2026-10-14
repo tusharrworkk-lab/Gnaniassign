@@ -8,6 +8,44 @@ Python 3.12 or newer is required. Install with `uv sync --extra local-laya`, the
 
 To run intent classification locally on an NVIDIA GPU, install `uv sync --extra local-laya` and set `INTENT_PROVIDER=local_laya`, `LOCAL_LAYA_DEVICE=cuda`, and `LOCAL_LAYA_BACKEND=eager` in `.env`. The first startup downloads the public `convaiinnovations/laya` checkpoint. Startup also warms the model; later sessions in the same process reuse it. CUDA is fail-fast: the app refuses Laya's silent CPU fallback when CUDA was requested. Run `uv run python -m gnaniassignment.pipeline.laya_diagnostic` before startup; `nvidia-smi` and that diagnostic must report a visible GPU. `INTENT_PROVIDER=laya` keeps the hosted Vercel route. The Vercel answer subagent remains hosted in either mode.
 
+## Native laya.cpp router (recommended local experiment)
+
+`laya.cpp` runs Laya through native ggml/CUDA and exposes the same JEV-compatible `/v1/systemone` API. It keeps one checkpoint resident, so our Python process only makes a loopback HTTP call per intent. Do **not** invoke `laya-cli` per user turn.
+
+For the GTX 1650 Ti (SM 75), use the upstream Linux CUDA 13 release: it contains an SM 75 kernel and avoids installing a CUDA compiler. Download its latest `linux-amd64-cuda13` executable into an ignored `local/laya.cpp/` directory, make it executable, then fetch the English checkpoint from the cloned upstream repository.
+
+```bash
+mkdir -p local/laya.cpp
+git clone --recurse-submodules https://github.com/lkarlslund/laya.cpp.git local/laya.cpp/source
+cd local/laya.cpp/source
+python3 scripts/download_model.py --variant english
+# Put the downloaded laya-rNNNN-linux-amd64-cuda13 executable at ../laya-cli.
+chmod +x ../laya-cli
+../laya-cli --server --host 127.0.0.1 --port 8080 \
+  --model models/laya --variant english --tensor-core-fp32 --flash-fp32 \
+  --batch-wait-ms 0
+```
+
+`--bf16` is not applicable to the GTX 1650 Ti: it needs compute capability 8.0 or newer. The optimized FP32 flags above still use the native CUDA Tensor Core path. After `/health` reports ready, set `INTENT_PROVIDER=laya_cpp` in `.env`; `LAYA_CPP_URL`, `LAYA_CPP_MODEL` (normally `laya`), and an optional `LAYA_CPP_API_KEY` are defined in `.env.example`. Keep the terminal that hosts the server running, then measure the end-to-end split with:
+
+```bash
+uv run python -m gnaniassignment.pipeline.check --runs 10 "Where do you operate?"
+```
+
+The native route removes Python framework overhead, but it cannot guarantee a 25 ms single-query result on a GTX 1650 Ti. Measure its warm median against the current ~516 ms Python baseline before adopting it.
+
+## Gnani realtime STT
+
+Install the official streaming client when you are ready to attach microphone or call audio:
+
+```bash
+uv sync --extra gnani-stt
+```
+
+Set `GNANI_API_KEY` in `.env`. `GNANI_STT_LANGUAGE` defaults to `en-IN`; use `GNANI_STT_SAMPLE_RATE=8000` for narrowband telephony or `16000` for wideband audio. The adapter accepts only 1,024-byte signed-16-bit little-endian mono PCM frames, matching Gnani's realtime protocol. Send them at their natural realtime cadence rather than in bursts.
+
+`GnaniRealtimeStt` yields a final `GnaniTranscript` for each VAD-closed segment. `GnaniTurnBridge.handle()` immediately starts Laya and the selected subagent by default—the lowest-latency path. Use `handle_async()` from the WebSocket receiver so the synchronous LangGraph work does not block audio/event I/O. For a workflow that intentionally combines segments, construct the bridge with `auto_end_turn=False`, then call `end_turn()` explicitly. Gnani's `processing` event is useful to update the UI (for example, “transcribing…”), but it is not text and is never sent to Laya.
+
 For a device-verified Laya-only measurement, run `uv run --extra local-laya python -m gnaniassignment.pipeline.laya_benchmark --runs 10`. It verifies that model parameters are on the same CUDA device as Laya and synchronizes CUDA before and after every prediction, so the reported warm latency is not an asynchronous-timing artifact. For the fused CUDA path, install `uv sync --extra local-laya-fast`, then benchmark `--backend tilelang`. This is the preferred acceleration experiment for the Turing GPU; keep `eager` unless TileLang loads successfully and wins the warm median. For a GTX 1650 Ti, set `TILELANG_DEFAULT_TARGET='{"kind":"cuda","arch":"sm_75"}'` if automatic target detection fails. Do not use `compile` for this latency-sensitive single-request path because its start-up compilation can be substantial.
 
 ```bash

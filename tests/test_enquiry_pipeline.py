@@ -9,6 +9,7 @@ from gnaniassignment.llm.agents.enquiry import enquiry_agents
 from gnaniassignment.llm.chat import DEFAULT_SUBAGENT_MODEL, VercelGatewayChatModel
 from gnaniassignment.llm.memory import ChatTurn, render_memory, select_memory, topic_from_query
 from gnaniassignment.llm.local_laya import LocalLayaRouter, require_requested_cuda
+from gnaniassignment.llm.laya_cpp import DEFAULT_LAYA_CPP_MODEL, DEFAULT_LAYA_CPP_URL, LayaCppRouter
 from gnaniassignment.llm.prompts.intents import QUESTIONS
 from gnaniassignment.llm.retrieval import IntentScopedRetriever
 from gnaniassignment.llm.router import LAYA_GATEWAY_URL, LAYA_MODEL, LayaGatewayRouter
@@ -16,6 +17,7 @@ from gnaniassignment.orchestration.graph import build_graph, select_intent
 from gnaniassignment.orchestration.session import TurnSession
 from gnaniassignment.pipeline.provider_benchmark import provider_from_event
 from gnaniassignment.pipeline.laya_benchmark import _same_execution_device
+from gnaniassignment.stt.gnani import GnaniTranscript, GnaniTurnBridge, PCM_FRAME_BYTES
 
 
 class Router:
@@ -51,6 +53,44 @@ class Store:
 
 
 class PipelineTests(unittest.TestCase):
+    def test_gnani_final_transcript_auto_dispatches_once_by_default(self):
+        class Session:
+            def __init__(self):
+                self.phrases: list[str] = []
+                self.ends = 0
+
+            def feed_final(self, phrase):
+                self.phrases.append(phrase)
+                return {"pending_text": " ".join(self.phrases)}
+
+            def feed_end(self, on_chunk=None):
+                self.ends += 1
+                return {"spoken": "Done"}
+
+        session = Session()
+        bridge = GnaniTurnBridge(session)
+        event = GnaniTranscript("Where do you operate?", segment_id="segment-1")
+        self.assertEqual(bridge.handle(event), {"spoken": "Done"})
+        self.assertIsNone(bridge.handle(event))
+        self.assertEqual(session.ends, 1)
+
+    def test_gnani_bridge_can_join_final_segments_when_requested(self):
+        class Session:
+            def __init__(self):
+                self.phrases: list[str] = []
+
+            def feed_final(self, phrase):
+                self.phrases.append(phrase)
+                return {"pending_text": " ".join(self.phrases)}
+
+            def feed_end(self, on_chunk=None):
+                return {"spoken": " ".join(self.phrases)}
+
+        bridge = GnaniTurnBridge(Session(), auto_end_turn=False)
+        self.assertEqual(bridge.handle(GnaniTranscript("Book a meeting.")), {"pending_text": "Book a meeting."})
+
+    def test_gnani_pcm_frame_size_is_fixed(self):
+        self.assertEqual(PCM_FRAME_BYTES, 1024)
     def test_laya_benchmark_treats_cuda_and_cuda_zero_as_same_device(self):
         self.assertTrue(_same_execution_device("cuda", "cuda:0"))
     def test_requested_cuda_fails_fast_when_runtime_is_unavailable(self):
@@ -183,6 +223,32 @@ class PipelineTests(unittest.TestCase):
         self.assertGreaterEqual(router.last_ms, 0)
         with self.assertRaises(ValueError):
             router.predict(state, QUESTIONS, model="different-checkpoint")
+
+    def test_laya_cpp_adapter_sends_system_one_request_to_local_server(self):
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"model": "laya", "answers": {"intent": {"choice": "user_core", "confidence": 0.9}}}
+
+        class HTTP:
+            def __init__(self):
+                self.request = None
+
+            def post(self, url, **kwargs):
+                self.request = (url, kwargs)
+                return Response()
+
+        router = LayaCppRouter(api_key="local-key")
+        router.http = HTTP()
+        state = {"current_query": "Where do you operate?", "recent_conversation": []}
+        result = router.predict(state, QUESTIONS)
+        url, kwargs = router.http.request
+        self.assertEqual(url, f"{DEFAULT_LAYA_CPP_URL}/v1/systemone")
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer local-key")
+        self.assertEqual(kwargs["json"], {"model": DEFAULT_LAYA_CPP_MODEL, "state": state, "questions": QUESTIONS})
+        self.assertEqual(result["answers"]["intent"]["choice"], "user_core")
 
     def test_llama_subagent_uses_vercel_gateway_client(self):
         class ChatResource:

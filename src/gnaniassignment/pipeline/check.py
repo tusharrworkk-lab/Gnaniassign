@@ -9,6 +9,7 @@ from gnaniassignment.app.config import Settings, load_environment
 from gnaniassignment.app.container import create_intent_router
 from gnaniassignment.llm.agents.enquiry import enquiry_agents
 from gnaniassignment.llm.chat import VercelGatewayChatModel
+from gnaniassignment.llm.laya_cpp import LayaCppRouter
 from gnaniassignment.llm.local_laya import LocalLayaRouter
 from gnaniassignment.llm.router import LayaGatewayRouter
 from gnaniassignment.orchestration.graph import build_graph
@@ -36,7 +37,12 @@ def main() -> None:
         _run_turn(session, router, model, query)
 
 
-def _run_turn(session: TurnSession, router: LayaGatewayRouter | LocalLayaRouter, model: VercelGatewayChatModel, query: str) -> None:
+def _run_turn(
+    session: TurnSession,
+    router: LayaGatewayRouter | LocalLayaRouter | LayaCppRouter,
+    model: VercelGatewayChatModel,
+    query: str,
+) -> None:
     model.last_first_token_ms = None
     model.last_stream_ms = None
     started = time.perf_counter()
@@ -53,8 +59,9 @@ def _run_turn(session: TurnSession, router: LayaGatewayRouter | LocalLayaRouter,
     print()
     elapsed_ms = (time.perf_counter() - started) * 1000
     print(f"intent: {result['intent']}  topic: {result['topic']}")
-    print(f"Laya {'local GPU' if isinstance(router, LocalLayaRouter) else 'gateway'}: {router.last_ms:.0f} ms")
-    if isinstance(router, LayaGatewayRouter) and router.last_headers_ms is not None:
+    source = "local Python GPU" if isinstance(router, LocalLayaRouter) else "local laya.cpp" if isinstance(router, LayaCppRouter) else "gateway"
+    print(f"Laya {source}: {router.last_ms:.0f} ms")
+    if isinstance(router, (LayaGatewayRouter, LayaCppRouter)) and router.last_headers_ms is not None:
         print(f"  until response headers: {router.last_headers_ms:.0f} ms")
         print(f"  body + JSON validation: {max(0, router.last_ms - router.last_headers_ms):.0f} ms")
     if model.last_first_token_ms is not None:

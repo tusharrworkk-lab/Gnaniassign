@@ -5,6 +5,7 @@ from __future__ import annotations
 from gnaniassignment.app.config import Settings, load_environment
 from gnaniassignment.llm.agents.enquiry import enquiry_agents
 from gnaniassignment.llm.chat import VercelGatewayChatModel
+from gnaniassignment.llm.laya_cpp import LayaCppRouter
 from gnaniassignment.llm.local_laya import LocalLayaRouter
 from gnaniassignment.llm.router import LayaGatewayRouter
 from gnaniassignment.llm.retrieval import EmptyRetriever, IntentScopedRetriever
@@ -12,12 +13,14 @@ from gnaniassignment.orchestration.graph import build_graph
 from gnaniassignment.orchestration.session import TurnSession
 
 
-def create_intent_router(settings: Settings) -> LayaGatewayRouter | LocalLayaRouter:
+def create_intent_router(settings: Settings) -> LayaGatewayRouter | LocalLayaRouter | LayaCppRouter:
     if settings.intent_provider == "local_laya":
         return LocalLayaRouter()
+    if settings.intent_provider == "laya_cpp":
+        return LayaCppRouter()
     if settings.intent_provider == "laya":
         return LayaGatewayRouter()
-    raise ValueError("INTENT_PROVIDER must be 'local_laya' or 'laya'.")
+    raise ValueError("INTENT_PROVIDER must be 'local_laya', 'laya_cpp', or 'laya'.")
 
 
 def create_session(

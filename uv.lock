@@ -3,10 +3,10 @@ revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'darwin'",
-    "python_full_version == '3.13.*' and sys_platform == 'darwin'",
-    "python_full_version < '3.13' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and sys_platform != 'darwin'",
+    "python_full_version == '3.13.*' and sys_platform == 'darwin'",
     "python_full_version == '3.13.*' and sys_platform != 'darwin'",
+    "python_full_version < '3.13' and sys_platform == 'darwin'",
     "python_full_version < '3.13' and sys_platform != 'darwin'",
 ]
 
@@ -352,6 +352,19 @@ wheels = [
 ]
 
 [[package]]
+name = "gnani-vachana"
+version = "0.8.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4d/fb/b82d2ce2a5135ec5a0fa2984bc9577bae0574c8654cb4becf18ecbdfa1f5/gnani_vachana-0.8.1.tar.gz", hash = "sha256:b30d3fedf86104170a99bd60f927bd7f0365a877821fb34cb0c77d4b12ed6987", size = 42464, upload-time = "2026-10-06T07:54:39.689Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3e/bf/feeaef5b87213c0212ac8f31c2185cdd1d93079df08fce2da856bd39c1fc/gnani_vachana-0.8.1-py3-none-any.whl", hash = "sha256:410d16c0eba7f7a3321f8ef95688423842835a334795604f7cdffd549d6ef0b5", size = 41833, upload-time = "2026-10-06T07:54:38.207Z" },
+]
+
+[[package]]
 name = "gnaniassignment"
 version = "0.1.0"
 source = { editable = "." }
@@ -363,6 +376,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+gnani-stt = [
+    { name = "gnani-vachana" },
+]
 local-laya = [
     { name = "laya" },
     { name = "torch" },
@@ -380,6 +396,7 @@ transformers-experiment = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", marker = "extra == 'transformers-experiment'" },
+    { name = "gnani-vachana", marker = "extra == 'gnani-stt'" },
     { name = "langgraph" },
     { name = "laya", marker = "extra == 'local-laya'" },
     { name = "laya", extras = ["fast"], marker = "extra == 'local-laya-fast'" },
@@ -391,7 +408,7 @@ requires-dist = [
     { name = "torch", marker = "extra == 'transformers-experiment'" },
     { name = "transformers", marker = "extra == 'transformers-experiment'" },
 ]
-provides-extras = ["local-laya", "local-laya-fast", "transformers-experiment"]
+provides-extras = ["local-laya", "local-laya-fast", "gnani-stt", "transformers-experiment"]
 
 [[package]]
 name = "h11"

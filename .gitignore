@@ -13,3 +13,6 @@ wheels/
 .env
 .env.*
 !.env.example
+
+# Machine-specific native laya.cpp checkout, models and service scripts
+local/

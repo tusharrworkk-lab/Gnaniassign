@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 local-laya = ["laya", "torch"]
 local-laya-fast = ["laya[fast]", "torch"]
+gnani-stt = ["gnani-vachana"]
 transformers-experiment = ["transformers", "accelerate", "torch"]
 
 [project.scripts]
