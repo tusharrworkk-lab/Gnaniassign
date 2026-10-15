@@ -98,6 +98,45 @@ uv run python -m gnaniassignment.pipeline.check "What does the product do?"
 
 The CLI uses placeholder knowledge and will say when company or product facts are unavailable. Pass approved knowledge or an intent-scoped retriever through `create_session()` in `app/container.py` to enable factual answers.
 
+## Gemini 2.5 Flash on Vertex AI
+
+The pipeline can stream `gemini-2.5-flash` through the official Google Gen AI SDK. It implements the same `ChatModel` interface as Vercel, so TTFT and complete-stream timing remain visible in `pipeline.check`.
+
+Install the provider alongside the active retail classifier:
+
+```bash
+uv sync --extra retail-classifier --extra gemini
+```
+
+Choose exactly one authentication mode in `.env`:
+
+```env
+# Vertex AI Express Mode: API-key billing, Google selects request routing.
+LLM_PROVIDER=vertex_gemini
+GEMINI_AUTH_MODE=vertex_api_key
+GEMINI_API_KEY=your_key_here
+GEMINI_MODEL=gemini-2.5-flash
+```
+
+```env
+# Standard regional Vertex AI: use this when Mumbai residency is required.
+LLM_PROVIDER=vertex_gemini
+GEMINI_AUTH_MODE=vertex_adc
+GOOGLE_CLOUD_PROJECT=your_project_id
+GOOGLE_CLOUD_LOCATION=asia-south1
+# Authenticate with Application Default Credentials or GOOGLE_APPLICATION_CREDENTIALS.
+```
+
+`asia-south1` is the Mumbai Vertex AI region and supports Gemini 2.5 Flash. API-key Express Mode and regional Vertex AI are different Google Cloud products: an API key alone does not provide a regional-residency guarantee. Use `vertex_adc` with `GOOGLE_CLOUD_LOCATION=asia-south1` for a Mumbai-pinned serverless endpoint. Keep the API key and service-account credentials out of Git; `.env` is ignored.
+
+For the voice response path, `GEMINI_THINKING_BUDGET=0` is the default. Gemini 2.5 Flash otherwise allocates an automatic thinking budget before producing the short JSON answer, increasing TTFT and potentially exhausting a small response-token cap.
+
+After credentials are configured, run:
+
+```bash
+uv run python -m gnaniassignment.pipeline.check --runs 3 "मेरा ऑर्डर अभी तक डिलीवर नहीं हुआ"
+```
+
 The CLI and `pipeline.check` stream only the spoken answer, not the internal JSON summary. For application code, call `session.ask_stream(query, on_chunk)` or `session.feed_end(on_chunk=on_chunk)` after final STT phrases. The callback receives decoded answer fragments; the returned result and session history are complete only after the stream ends. `pipeline.check` reports Vercel Gateway TTFT from the subagent request, plus time from turn start to the first answer text.
 
 To compare cold and reused-client latency, run `uv run python -m gnaniassignment.pipeline.check --runs 3 "What does the product do?"`. Each run starts with fresh conversation history but reuses the same Laya router and Vercel Gateway client. The report separates Laya classification, Vercel time to first text chunk and stream completion, and remaining local pipeline work. In hosted mode it also reports time to Laya response headers.

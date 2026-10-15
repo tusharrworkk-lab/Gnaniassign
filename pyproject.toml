@@ -22,6 +22,7 @@ decision-model = ["scikit-learn"]
 transformers-experiment = ["transformers", "accelerate", "torch"]
 retail-classifier = ["transformers", "torch"]
 vllm = ["vllm"]
+gemini = ["google-genai"]
 
 [project.scripts]
 gnaniassignment = "gnaniassignment:main"
