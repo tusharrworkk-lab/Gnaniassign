@@ -82,13 +82,24 @@ class EnquiryAgent(SubAgent):
             return output
         answer_stream = _AnswerStream()
         raw_parts: list[str] = []
+        structured: bool | None = None
+        plain_answer_streamed = False
         for chunk in stream_complete(system_prompt, user_prompt):
             raw_parts.append(chunk)
-            answer_delta = answer_stream.feed(chunk)
-            if answer_delta:
-                on_chunk(answer_delta)
+            if structured is None:
+                joined = "".join(raw_parts).lstrip()
+                if not joined:
+                    continue
+                structured = joined.startswith("{")
+            if structured:
+                answer_delta = answer_stream.feed(chunk)
+                if answer_delta:
+                    on_chunk(answer_delta)
+            else:
+                on_chunk(chunk)
+                plain_answer_streamed = True
         output = self._parse_response("".join(raw_parts), text)
-        if not answer_stream.emitted:
+        if not answer_stream.emitted and not plain_answer_streamed:
             on_chunk(output.answer)
         return output
 

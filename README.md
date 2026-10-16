@@ -98,6 +98,83 @@ uv run python -m gnaniassignment.pipeline.check "What does the product do?"
 
 The CLI uses placeholder knowledge and will say when company or product facts are unavailable. Pass approved knowledge or an intent-scoped retriever through `create_session()` in `app/container.py` to enable factual answers.
 
+## Amazon Bedrock: Gemma 3 4B in Mumbai
+
+The Bedrock provider uses `ConverseStream` with the direct Mumbai endpoint, not an APAC or global inference profile. Install its optional dependency and use a Bedrock API key (or, alternatively, the standard AWS SDK credential chain):
+
+```bash
+uv sync --extra retail-classifier --extra bedrock
+```
+
+```env
+LLM_PROVIDER=bedrock
+BEDROCK_REGION=ap-south-1
+BEDROCK_MODEL=google.gemma-3-4b-it
+BEDROCK_MAX_OUTPUT_TOKENS=32
+BEDROCK_API_KEY=your_bedrock_api_key
+```
+
+Generate the key in the Bedrock console while Mumbai is selected. A short-term key is limited to your console session (up to 12 hours), while a long-term key should be used only for development. The key needs `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` permissions for this model. Then benchmark the real Mumbai path:
+
+To use IAM credentials instead of an API key, choose the IAM mode. The SDK then uses a named AWS profile, AWS SSO, environment credentials, or an attached compute role. IAM access needs `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` for `google.gemma-3-4b-it`.
+
+```bash
+aws configure sso --profile bedrock-mumbai
+aws sso login --profile bedrock-mumbai
+```
+
+```env
+LLM_PROVIDER=bedrock
+BEDROCK_AUTH_MODE=iam
+AWS_PROFILE=bedrock-mumbai
+BEDROCK_REGION=ap-south-1
+BEDROCK_MODEL=google.gemma-3-4b-it
+```
+
+```bash
+uv run python -m gnaniassignment.pipeline.check --runs 3 "मेरा ऑर्डर अभी तक डिलीवर नहीं हुआ"
+```
+
+## Cerebras Llama 3.3 70B
+
+Cerebras exposes an OpenAI-compatible streaming endpoint. Set the key in the ignored `.env` and select the provider:
+
+```env
+LLM_PROVIDER=cerebras
+CEREBRAS_API_KEY=your_key_here
+CEREBRAS_MODEL=llama-3.3-70b
+CEREBRAS_MAX_OUTPUT_TOKENS=32
+```
+
+No extra package is needed because the project already uses the OpenAI Python SDK. The pipeline reports Cerebras first-text TTFT through the same `pipeline.check` command. Gemini remains implemented as an inactive alternative; switch `LLM_PROVIDER` back to `vertex_gemini` to use it.
+
+## Groq Llama 3.3 70B
+
+Groq uses the same OpenAI-compatible client already present in the project. Configure it in the ignored `.env`:
+
+```env
+LLM_PROVIDER=groq
+GROQ_API_KEY=your_key_here
+GROQ_MODEL=llama-3.3-70b-versatile
+GROQ_MAX_OUTPUT_TOKENS=32
+```
+
+The public Groq API does not publish a customer-selectable India endpoint. Deploy the application gateway near your users, then benchmark actual Groq TTFT from that gateway before selecting it for production.
+
+## Simplismart Llama 3.1 8B
+
+Simplismart's shared endpoint is OpenAI-compatible and uses the following active configuration:
+
+```env
+LLM_PROVIDER=simplismart
+SIMPLISMART_API_KEY=your_key_here
+SIMPLISMART_BASE_URL=https://api.simplismart.live
+SIMPLISMART_MODEL=meta-llama/Meta-Llama-3.1-8B-Instruct
+SIMPLISMART_MAX_OUTPUT_TOKENS=32
+```
+
+After adding the key, use `pipeline.check --runs 3` to measure cold and warm TTFT with the same intent-routed Hindi query.
+
 ## Gemini 2.5 Flash on Vertex AI
 
 The pipeline can stream `gemini-2.5-flash` through the official Google Gen AI SDK. It implements the same `ChatModel` interface as Vercel, so TTFT and complete-stream timing remain visible in `pipeline.check`.

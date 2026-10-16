@@ -14,6 +14,14 @@ DEFAULT_GATEWAY_URL = "https://ai-gateway.vercel.sh/v1"
 DEFAULT_VLLM_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_GEMMA_MODEL = "google/gemma-3-1b-it"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_CEREBRAS_URL = "https://api.cerebras.ai/v1"
+DEFAULT_CEREBRAS_MODEL = "llama-3.3-70b"
+DEFAULT_GROQ_URL = "https://api.groq.com/openai/v1"
+DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_SIMPLISMART_URL = "https://api.simplismart.live"
+DEFAULT_SIMPLISMART_MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+DEFAULT_BEDROCK_REGION = "ap-south-1"
+DEFAULT_BEDROCK_MODEL = "google.gemma-3-4b-it"
 
 
 class ChatModel(Protocol):
@@ -139,6 +147,271 @@ class VllmGemmaChatModel:
             self.last_stream_ms = (time.perf_counter() - started) * 1000
 
 
+class CerebrasChatModel:
+    """Low-latency streamed Llama responses via Cerebras' OpenAI-compatible API."""
+
+    def __init__(self, model: str | None = None, api_key: str | None = None, client: OpenAI | None = None) -> None:
+        self.model = model or os.getenv("CEREBRAS_MODEL") or DEFAULT_CEREBRAS_MODEL
+        self.last_first_token_ms: float | None = None
+        self.last_stream_ms: float | None = None
+        if client is not None:
+            self.client = client
+        else:
+            key = api_key or os.getenv("CEREBRAS_API_KEY")
+            if not key:
+                raise ValueError("Set CEREBRAS_API_KEY in .env or your environment")
+            self.client = OpenAI(
+                api_key=key,
+                base_url=os.getenv("CEREBRAS_BASE_URL") or DEFAULT_CEREBRAS_URL,
+                timeout=float(os.getenv("CEREBRAS_TIMEOUT_SECONDS", "20")),
+                max_retries=0,
+            )
+
+    def complete(self, system: str, user: str) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.2,
+            max_tokens=int(os.getenv("CEREBRAS_MAX_OUTPUT_TOKENS", "32")),
+            reasoning_effort=os.getenv("CEREBRAS_REASONING_EFFORT", "none"),
+        )
+        content = response.choices[0].message.content
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("Cerebras returned an empty text response")
+        return content.strip()
+
+    def stream_complete(self, system: str, user: str) -> Iterator[str]:
+        started = time.perf_counter()
+        self.last_first_token_ms = None
+        self.last_stream_ms = None
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.2,
+                max_tokens=int(os.getenv("CEREBRAS_MAX_OUTPUT_TOKENS", "32")),
+                reasoning_effort=os.getenv("CEREBRAS_REASONING_EFFORT", "none"),
+                stream=True,
+            )
+            for event in stream:
+                if not event.choices:
+                    continue
+                content = event.choices[0].delta.content
+                if isinstance(content, str) and content:
+                    if self.last_first_token_ms is None:
+                        self.last_first_token_ms = (time.perf_counter() - started) * 1000
+                    yield content
+        finally:
+            self.last_stream_ms = (time.perf_counter() - started) * 1000
+
+
+class GroqChatModel:
+    """Stream Llama responses through Groq's OpenAI-compatible API."""
+
+    def __init__(self, model: str | None = None, api_key: str | None = None, client: OpenAI | None = None) -> None:
+        self.model = model or os.getenv("GROQ_MODEL") or DEFAULT_GROQ_MODEL
+        self.last_first_token_ms: float | None = None
+        self.last_stream_ms: float | None = None
+        if client is not None:
+            self.client = client
+        else:
+            key = api_key or os.getenv("GROQ_API_KEY")
+            if not key:
+                raise ValueError("Set GROQ_API_KEY in .env or your environment")
+            self.client = OpenAI(
+                api_key=key,
+                base_url=os.getenv("GROQ_BASE_URL") or DEFAULT_GROQ_URL,
+                timeout=float(os.getenv("GROQ_TIMEOUT_SECONDS", "20")),
+                max_retries=0,
+            )
+
+    def complete(self, system: str, user: str) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.2,
+            max_tokens=int(os.getenv("GROQ_MAX_OUTPUT_TOKENS", "32")),
+            reasoning_effort=os.getenv("GROQ_REASONING_EFFORT", "low"),
+        )
+        content = response.choices[0].message.content
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("Groq returned an empty text response")
+        return content.strip()
+
+    def stream_complete(self, system: str, user: str) -> Iterator[str]:
+        started = time.perf_counter()
+        self.last_first_token_ms = None
+        self.last_stream_ms = None
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.2,
+                max_tokens=int(os.getenv("GROQ_MAX_OUTPUT_TOKENS", "32")),
+                reasoning_effort=os.getenv("GROQ_REASONING_EFFORT", "low"),
+                stream=True,
+            )
+            for event in stream:
+                if not event.choices:
+                    continue
+                content = event.choices[0].delta.content
+                if isinstance(content, str) and content:
+                    if self.last_first_token_ms is None:
+                        self.last_first_token_ms = (time.perf_counter() - started) * 1000
+                    yield content
+        finally:
+            self.last_stream_ms = (time.perf_counter() - started) * 1000
+
+
+class SimplismartChatModel:
+    """Stream Llama 3.1 8B through Simplismart's chat-completions API."""
+
+    def __init__(self, model: str | None = None, api_key: str | None = None, client: OpenAI | None = None) -> None:
+        self.model = model or os.getenv("SIMPLISMART_MODEL") or DEFAULT_SIMPLISMART_MODEL
+        self.last_first_token_ms: float | None = None
+        self.last_stream_ms: float | None = None
+        if client is not None:
+            self.client = client
+        else:
+            key = api_key or os.getenv("SIMPLISMART_API_KEY")
+            if not key:
+                raise ValueError("Set SIMPLISMART_API_KEY in .env or your environment")
+            self.client = OpenAI(
+                api_key=key,
+                base_url=os.getenv("SIMPLISMART_BASE_URL") or DEFAULT_SIMPLISMART_URL,
+                timeout=float(os.getenv("SIMPLISMART_TIMEOUT_SECONDS", "20")),
+                max_retries=0,
+            )
+
+    def complete(self, system: str, user: str) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.2,
+            max_tokens=int(os.getenv("SIMPLISMART_MAX_OUTPUT_TOKENS", "32")),
+        )
+        content = response.choices[0].message.content
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("Simplismart returned an empty text response")
+        return content.strip()
+
+    def stream_complete(self, system: str, user: str) -> Iterator[str]:
+        started = time.perf_counter()
+        self.last_first_token_ms = None
+        self.last_stream_ms = None
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.2,
+                max_tokens=int(os.getenv("SIMPLISMART_MAX_OUTPUT_TOKENS", "32")),
+                stream=True,
+            )
+            for event in stream:
+                if not event.choices:
+                    continue
+                content = event.choices[0].delta.content
+                if isinstance(content, str) and content:
+                    if self.last_first_token_ms is None:
+                        self.last_first_token_ms = (time.perf_counter() - started) * 1000
+                    yield content
+        finally:
+            self.last_stream_ms = (time.perf_counter() - started) * 1000
+
+
+class BedrockChatModel:
+    """Stream Gemma from the in-region Amazon Bedrock Mumbai endpoint."""
+
+    def __init__(
+        self,
+        model: str | None = None,
+        api_key: str | None = None,
+        client: object | None = None,
+    ) -> None:
+        self.model = model or os.getenv("BEDROCK_MODEL") or DEFAULT_BEDROCK_MODEL
+        self.region = os.getenv("BEDROCK_REGION") or DEFAULT_BEDROCK_REGION
+        self.auth_mode = os.getenv("BEDROCK_AUTH_MODE", "api_key").lower()
+        self.last_first_token_ms: float | None = None
+        self.last_stream_ms: float | None = None
+        if client is not None:
+            self.client = client
+            return
+
+        try:
+            import boto3
+        except ImportError as error:
+            raise RuntimeError("Install the Bedrock provider with: uv sync --extra bedrock") from error
+
+        if self.auth_mode == "api_key":
+            # Boto3 recognizes this official environment variable and sends the
+            # key as a Bedrock bearer token instead of SigV4 IAM credentials.
+            bearer_token = api_key or os.getenv("BEDROCK_API_KEY")
+            if bearer_token:
+                os.environ["AWS_BEARER_TOKEN_BEDROCK"] = bearer_token
+        elif self.auth_mode == "iam":
+            # Explicitly prevent an inherited bearer token from overriding the
+            # selected IAM/SSO/profile credential chain in this process.
+            os.environ.pop("AWS_BEARER_TOKEN_BEDROCK", None)
+        else:
+            raise ValueError("BEDROCK_AUTH_MODE must be 'api_key' or 'iam'.")
+        profile = os.getenv("AWS_PROFILE")
+        session = boto3.Session(profile_name=profile or None, region_name=self.region)
+        self.client = session.client("bedrock-runtime")
+
+    def _request(self, system: str, user: str) -> dict[str, object]:
+        return {
+            "modelId": self.model,
+            "system": [{"text": system}],
+            "messages": [{"role": "user", "content": [{"text": user}]}],
+            "inferenceConfig": {
+                "temperature": 0.2,
+                "maxTokens": int(os.getenv("BEDROCK_MAX_OUTPUT_TOKENS", "32")),
+            },
+        }
+
+    def complete(self, system: str, user: str) -> str:
+        response = self.client.converse(**self._request(system, user))
+        content = response["output"]["message"]["content"]
+        text = "".join(part.get("text", "") for part in content)
+        if not text.strip():
+            raise ValueError("Amazon Bedrock returned an empty text response")
+        return text.strip()
+
+    def stream_complete(self, system: str, user: str) -> Iterator[str]:
+        started = time.perf_counter()
+        self.last_first_token_ms = None
+        self.last_stream_ms = None
+        try:
+            response = self.client.converse_stream(**self._request(system, user))
+            for event in response["stream"]:
+                delta = event.get("contentBlockDelta", {}).get("delta", {})
+                content = delta.get("text")
+                if isinstance(content, str) and content:
+                    if self.last_first_token_ms is None:
+                        self.last_first_token_ms = (time.perf_counter() - started) * 1000
+                    yield content
+        finally:
+            self.last_stream_ms = (time.perf_counter() - started) * 1000
+
+
 class VertexGeminiChatModel:
     """Gemini 2.5 Flash through Vertex AI, streaming text for TTS."""
 
@@ -175,14 +448,23 @@ class VertexGeminiChatModel:
             raise ValueError("GEMINI_AUTH_MODE must be 'vertex_api_key' or 'vertex_adc'.")
 
     def _config(self, system: str):
+        thinking_level = os.getenv("GEMINI_THINKING_LEVEL", "").upper()
+        if thinking_level:
+            try:
+                thinking_config = self._types.ThinkingConfig(
+                    thinking_level=self._types.ThinkingLevel[thinking_level],
+                )
+            except KeyError as error:
+                raise ValueError("GEMINI_THINKING_LEVEL must be MINIMAL, LOW, MEDIUM, or HIGH") from error
+        else:
+            thinking_config = self._types.ThinkingConfig(
+                thinking_budget=int(os.getenv("GEMINI_THINKING_BUDGET", "0")),
+            )
         return self._types.GenerateContentConfig(
             system_instruction=system,
             temperature=0.2,
-            max_output_tokens=60,
-            response_mime_type="application/json",
-            thinking_config=self._types.ThinkingConfig(
-                thinking_budget=int(os.getenv("GEMINI_THINKING_BUDGET", "0")),
-            ),
+            max_output_tokens=int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "32")),
+            thinking_config=thinking_config,
         )
 
     def complete(self, system: str, user: str) -> str:

@@ -23,6 +23,7 @@ transformers-experiment = ["transformers", "accelerate", "torch"]
 retail-classifier = ["transformers", "torch"]
 vllm = ["vllm"]
 gemini = ["google-genai"]
+bedrock = ["boto3"]
 
 [project.scripts]
 gnaniassignment = "gnaniassignment:main"

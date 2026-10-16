@@ -5,7 +5,7 @@ from __future__ import annotations
 from gnaniassignment.app.config import Settings, load_environment
 from gnaniassignment.llm.agents.enquiry import enquiry_agents
 from gnaniassignment.llm.agents.retail import retail_agents
-from gnaniassignment.llm.chat import ChatModel, VercelGatewayChatModel, VertexGeminiChatModel, VllmGemmaChatModel
+from gnaniassignment.llm.chat import BedrockChatModel, CerebrasChatModel, ChatModel, GroqChatModel, SimplismartChatModel, VercelGatewayChatModel, VertexGeminiChatModel, VllmGemmaChatModel
 from gnaniassignment.llm.laya_cpp import LayaCppRouter
 from gnaniassignment.llm.local_laya import LocalLayaRouter
 from gnaniassignment.llm.retail_classifier import HinglishRetailRouter
@@ -30,13 +30,21 @@ def create_intent_router(settings: Settings) -> LayaGatewayRouter | LocalLayaRou
 
 
 def create_chat_model(settings: Settings) -> ChatModel:
+    if settings.llm_provider == "bedrock":
+        return BedrockChatModel()
+    if settings.llm_provider == "simplismart":
+        return SimplismartChatModel()
+    if settings.llm_provider == "groq":
+        return GroqChatModel()
+    if settings.llm_provider == "cerebras":
+        return CerebrasChatModel()
     if settings.llm_provider == "vertex_gemini":
         return VertexGeminiChatModel()
     if settings.llm_provider == "vllm_gemma":
         return VllmGemmaChatModel()
     if settings.llm_provider == "vercel":
         return VercelGatewayChatModel()
-    raise ValueError("LLM_PROVIDER must be 'vertex_gemini', 'vllm_gemma', or 'vercel'.")
+    raise ValueError("LLM_PROVIDER must be 'bedrock', 'simplismart', 'groq', 'cerebras', 'vertex_gemini', 'vllm_gemma', or 'vercel'.")
 
 
 def create_session(

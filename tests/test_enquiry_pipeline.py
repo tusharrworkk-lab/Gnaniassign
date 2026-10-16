@@ -6,7 +6,7 @@ import unittest
 from types import SimpleNamespace
 
 from gnaniassignment.llm.agents.enquiry import enquiry_agents
-from gnaniassignment.llm.chat import DEFAULT_SUBAGENT_MODEL, VercelGatewayChatModel
+from gnaniassignment.llm.chat import BedrockChatModel, CerebrasChatModel, DEFAULT_BEDROCK_MODEL, DEFAULT_CEREBRAS_MODEL, DEFAULT_GROQ_MODEL, DEFAULT_SIMPLISMART_MODEL, DEFAULT_SUBAGENT_MODEL, GroqChatModel, SimplismartChatModel, VercelGatewayChatModel
 from gnaniassignment.llm.memory import ChatTurn, render_memory, select_memory, topic_from_query
 from gnaniassignment.llm.local_laya import LocalLayaRouter, require_requested_cuda
 from gnaniassignment.llm.laya_cpp import DEFAULT_LAYA_CPP_MODEL, DEFAULT_LAYA_CPP_URL, LayaCppRouter
@@ -284,6 +284,62 @@ class PipelineTests(unittest.TestCase):
         model = VercelGatewayChatModel(client=SimpleNamespace(chat=SimpleNamespace(completions=resource)))
         self.assertEqual(list(model.stream_complete("System", "User")), ["Hello", " there"])
         self.assertIs(resource.request["stream"], True)
+
+    def test_cerebras_llama_stream_uses_low_voice_token_cap(self):
+        class ChatResource:
+            def create(self, **kwargs):
+                self.request = kwargs
+                return iter([SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="नमस्ते"))])])
+
+        resource = ChatResource()
+        model = CerebrasChatModel(model=DEFAULT_CEREBRAS_MODEL, client=SimpleNamespace(chat=SimpleNamespace(completions=resource)))
+        self.assertEqual(list(model.stream_complete("System", "User")), ["नमस्ते"])
+        self.assertEqual(resource.request["model"], "llama-3.3-70b")
+        self.assertEqual(resource.request["max_tokens"], 32)
+        self.assertEqual(resource.request["reasoning_effort"], "none")
+        self.assertIs(resource.request["stream"], True)
+
+    def test_groq_llama_stream_uses_expected_model(self):
+        class ChatResource:
+            def create(self, **kwargs):
+                self.request = kwargs
+                return iter([SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="नमस्ते"))])])
+
+        resource = ChatResource()
+        model = GroqChatModel(model=DEFAULT_GROQ_MODEL, client=SimpleNamespace(chat=SimpleNamespace(completions=resource)))
+        self.assertEqual(list(model.stream_complete("System", "User")), ["नमस्ते"])
+        self.assertEqual(resource.request["model"], "llama-3.3-70b-versatile")
+        self.assertEqual(resource.request["max_tokens"], 32)
+        self.assertEqual(resource.request["reasoning_effort"], "low")
+        self.assertIs(resource.request["stream"], True)
+
+    def test_simplismart_llama_stream_uses_expected_model(self):
+        class ChatResource:
+            def create(self, **kwargs):
+                self.request = kwargs
+                return iter([SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="नमस्ते"))])])
+
+        resource = ChatResource()
+        model = SimplismartChatModel(model=DEFAULT_SIMPLISMART_MODEL, client=SimpleNamespace(chat=SimpleNamespace(completions=resource)))
+        self.assertEqual(list(model.stream_complete("System", "User")), ["नमस्ते"])
+        self.assertEqual(resource.request["model"], "meta-llama/Meta-Llama-3.1-8B-Instruct")
+        self.assertEqual(resource.request["max_tokens"], 32)
+        self.assertIs(resource.request["stream"], True)
+
+    def test_bedrock_gemma_stream_uses_mumbai_model(self):
+        class BedrockResource:
+            def converse_stream(self, **kwargs):
+                self.request = kwargs
+                return {"stream": iter([
+                    {"contentBlockDelta": {"delta": {"text": "नमस्ते"}}},
+                    {"messageStop": {"stopReason": "end_turn"}},
+                ])}
+
+        resource = BedrockResource()
+        model = BedrockChatModel(model=DEFAULT_BEDROCK_MODEL, client=resource)
+        self.assertEqual(list(model.stream_complete("System", "User")), ["नमस्ते"])
+        self.assertEqual(resource.request["modelId"], "google.gemma-3-4b-it")
+        self.assertEqual(resource.request["inferenceConfig"]["maxTokens"], 32)
 
     def test_session_streams_decoded_answer_and_stores_summary(self):
         class StreamingChat:
