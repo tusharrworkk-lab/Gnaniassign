@@ -60,15 +60,23 @@ The output separates the retail BERT routing time, Gemma first text chunk (TTFT)
 
 ## Gnani realtime STT
 
-Install the official streaming client when you are ready to attach microphone or call audio:
+Install the raw WebSocket client when you are ready to attach microphone or call audio:
 
 ```bash
 uv sync --extra gnani-stt
 ```
 
-Set `GNANI_API_KEY` in `.env`. `GNANI_STT_LANGUAGE` defaults to `en-IN`; use `GNANI_STT_SAMPLE_RATE=8000` for narrowband telephony or `16000` for wideband audio. The adapter accepts only 1,024-byte signed-16-bit little-endian mono PCM frames, matching Gnani's realtime protocol. Send them at their natural realtime cadence rather than in bursts.
+Set `GNANI_API_KEY` in `.env`. The configured pipeline is `hi-IN` at `16000` Hz: signed-16-bit little-endian mono PCM, exactly 1,024 bytes every 32 ms. The raw WebSocket adapter sends `x-vad-*` headers, which the official Python SDK does not expose. `GNANI_MIN_SILENCE_MS=300` is the latency-first setting; raise it to `400`–`600` if callers are commonly split at natural pauses. Do not burst buffered frames.
 
 `GnaniRealtimeStt` yields a final `GnaniTranscript` for each VAD-closed segment. `GnaniTurnBridge.handle()` immediately starts Laya and the selected subagent by default—the lowest-latency path. Use `handle_async()` from the WebSocket receiver so the synchronous LangGraph work does not block audio/event I/O. For a workflow that intentionally combines segments, construct the bridge with `auto_end_turn=False`, then call `end_turn()` explicitly. Gnani's `processing` event is useful to update the UI (for example, “transcribing…”), but it is not text and is never sent to Laya.
+
+Before sending telephony audio, verify that Gnani actually accepted the requested sample rate. This opens a connection but sends no PCM and appends the result to an ignored local log:
+
+```bash
+uv run python -m gnaniassignment.pipeline.gnani_stt_diagnostic
+```
+
+The expected result is `acknowledged_sample_rate: 16000`. Do not send audio at a different rate or cadence than the rate Gnani acknowledges.
 
 ## Reusable decision models
 

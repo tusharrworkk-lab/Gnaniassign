@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import unittest
 from types import SimpleNamespace
 
@@ -17,7 +18,7 @@ from gnaniassignment.orchestration.graph import build_graph, select_intent
 from gnaniassignment.orchestration.session import TurnSession
 from gnaniassignment.pipeline.provider_benchmark import provider_from_event
 from gnaniassignment.pipeline.laya_benchmark import _same_execution_device
-from gnaniassignment.stt.gnani import GnaniTranscript, GnaniTurnBridge, PCM_FRAME_BYTES
+from gnaniassignment.stt.gnani import GnaniProcessing, GnaniRealtimeStt, GnaniTranscript, GnaniTurnBridge, PCM_FRAME_BYTES
 
 
 class Router:
@@ -91,6 +92,57 @@ class PipelineTests(unittest.TestCase):
 
     def test_gnani_pcm_frame_size_is_fixed(self):
         self.assertEqual(PCM_FRAME_BYTES, 1024)
+
+    def test_gnani_16khz_raw_websocket_headers_and_events(self):
+        captured: dict[str, object] = {}
+
+        class Socket:
+            def __init__(self):
+                self.sent: list[bytes] = []
+                self.closed = False
+                self.messages = [
+                    '{"type":"connected","config":{"sample_rate":16000,"chunk_size":512}}',
+                    '{"type":"processing","timestamp":"2026-10-20T00:00:00Z"}',
+                    '{"type":"transcript","text":"mera order kahan hai","segment_id":"s-1","segment_index":0,"audio_duration_ms":640,"latency":111}',
+                ]
+
+            async def send(self, frame):
+                self.sent.append(frame)
+
+            async def close(self):
+                self.closed = True
+
+            async def recv(self):
+                return self.messages.pop(0)
+
+            async def __aiter__(self):
+                while self.messages:
+                    yield self.messages.pop(0)
+
+        socket = Socket()
+
+        async def connect(endpoint, headers):
+            captured["endpoint"] = endpoint
+            captured["headers"] = headers
+            return socket
+
+        async def exercise():
+            stt = GnaniRealtimeStt(api_key="test-key", language_code="hi-IN", sample_rate=16000, connect=connect)
+            self.assertEqual(stt.frame_interval_seconds, 0.032)
+            async with stt:
+                self.assertEqual(stt.active_sample_rate, 16000)
+                await stt.send_pcm(bytes(PCM_FRAME_BYTES))
+                return [event async for event in stt.events()]
+
+        events = asyncio.run(exercise())
+        headers = captured["headers"]
+        self.assertEqual(captured["endpoint"], "wss://api.vachana.ai/stt/v3/stream")
+        self.assertEqual(headers["x-sample-rate"], "16000")
+        self.assertEqual(headers["x-min-silence-ms"], "300")
+        self.assertEqual(socket.sent, [bytes(PCM_FRAME_BYTES)])
+        self.assertTrue(socket.closed)
+        self.assertEqual(events[0], GnaniProcessing(timestamp="2026-10-20T00:00:00Z"))
+        self.assertEqual(events[1], GnaniTranscript("mera order kahan hai", "s-1", 0, 640, 111))
     def test_laya_benchmark_treats_cuda_and_cuda_zero_as_same_device(self):
         self.assertTrue(_same_execution_device("cuda", "cuda:0"))
     def test_requested_cuda_fails_fast_when_runtime_is_unavailable(self):
