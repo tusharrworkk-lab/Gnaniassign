@@ -76,6 +76,16 @@ class PipelineTests(unittest.TestCase):
         self.assertIsNone(bridge.handle(event))
         self.assertEqual(session.ends, 1)
 
+    def test_gnani_blank_final_transcript_does_not_dispatch(self):
+        class Session:
+            def feed_final(self, phrase):
+                raise AssertionError("blank STT must not enter the session")
+
+            def feed_end(self, on_chunk=None):
+                raise AssertionError("blank STT must not enter the LLM")
+
+        self.assertIsNone(GnaniTurnBridge(Session()).handle(GnaniTranscript("   ")))
+
     def test_gnani_bridge_can_join_final_segments_when_requested(self):
         class Session:
             def __init__(self):
@@ -139,7 +149,7 @@ class PipelineTests(unittest.TestCase):
         headers = captured["headers"]
         self.assertEqual(captured["endpoint"], "wss://api.vachana.ai/stt/v3/stream")
         self.assertEqual(headers["x-sample-rate"], "16000")
-        self.assertEqual(headers["x-min-silence-ms"], "300")
+        self.assertEqual(headers["x-min-silence-ms"], "100")
         self.assertEqual(socket.sent, [bytes(PCM_FRAME_BYTES)])
         self.assertTrue(socket.closed)
         self.assertEqual(events[0], GnaniProcessing(timestamp="2026-10-20T00:00:00Z"))

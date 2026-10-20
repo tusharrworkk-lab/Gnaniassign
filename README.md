@@ -66,7 +66,7 @@ Install the raw WebSocket client when you are ready to attach microphone or call
 uv sync --extra gnani-stt
 ```
 
-Set `GNANI_API_KEY` in `.env`. The configured pipeline is `hi-IN` at `16000` Hz: signed-16-bit little-endian mono PCM, exactly 1,024 bytes every 32 ms. The raw WebSocket adapter sends `x-vad-*` headers, which the official Python SDK does not expose. `GNANI_MIN_SILENCE_MS=300` is the latency-first setting; raise it to `400`–`600` if callers are commonly split at natural pauses. Do not burst buffered frames.
+Set `GNANI_API_KEY` in `.env`. The configured pipeline is `en-IN` at `16000` Hz: signed-16-bit little-endian mono PCM, exactly 1,024 bytes every 32 ms. The raw WebSocket adapter sends `x-vad-*` headers, which the official Python SDK does not expose. `GNANI_MIN_SILENCE_MS=100` is the fastest final-segment setting; raise it to `300`–`600` if callers are split at natural pauses. Do not burst buffered frames.
 
 `GnaniRealtimeStt` yields a final `GnaniTranscript` for each VAD-closed segment. `GnaniTurnBridge.handle()` immediately starts Laya and the selected subagent by default—the lowest-latency path. Use `handle_async()` from the WebSocket receiver so the synchronous LangGraph work does not block audio/event I/O. For a workflow that intentionally combines segments, construct the bridge with `auto_end_turn=False`, then call `end_turn()` explicitly. Gnani's `processing` event is useful to update the UI (for example, “transcribing…”), but it is not text and is never sent to Laya.
 
@@ -93,6 +93,14 @@ uv run python -m gnaniassignment.pipeline.gnani_microphone --device plughw:1,0
 ```
 
 Production telephony/WebRTC adapters should follow the same lifecycle: open one `GnaniRealtimeStt` context when the call begins, forward every incoming customer-audio frame through it, and close it only when the call ends. Each VAD-closed utterance is delivered as a separate `GnaniTranscript` on that persistent connection.
+
+To run the full live chain—microphone → Gnani STT → retail intent classifier → streamed LLM—add `--with-llm`:
+
+```bash
+uv run python -m gnaniassignment.pipeline.gnani_microphone --device plughw:1,0 --with-llm
+```
+
+Every VAD-final segment triggers an answer. With the 100 ms latency-first VAD profile, keep utterances short and pause only when you want the assistant to answer.
 
 ## Reusable decision models
 

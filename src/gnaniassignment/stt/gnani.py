@@ -68,6 +68,10 @@ class GnaniTurnBridge:
     ) -> dict[str, Any] | None:
         if not isinstance(event, GnaniTranscript):
             return None
+        # VAD can occasionally close on initial room noise. A final event
+        # without words must never create an empty intent/LLM request.
+        if not event.text.strip():
+            return None
         if event.segment_id and event.segment_id in self._seen_segment_ids:
             return None
         if event.segment_id:
@@ -114,14 +118,14 @@ class GnaniRealtimeStt:
         self.api_key = api_key or os.getenv("GNANI_API_KEY")
         if not self.api_key:
             raise ValueError("Set GNANI_API_KEY in .env or pass api_key explicitly")
-        self.language_code = language_code or os.getenv("GNANI_STT_LANGUAGE", "hi-IN")
+        self.language_code = language_code or os.getenv("GNANI_STT_LANGUAGE", "en-IN")
         self.sample_rate = sample_rate or int(os.getenv("GNANI_STT_SAMPLE_RATE", "16000"))
         if self.sample_rate not in {8000, 16000, 44100, 48000}:
             raise ValueError("GNANI_STT_SAMPLE_RATE must be 8000, 16000, 44100, or 48000")
         self.endpoint = endpoint or os.getenv("GNANI_STT_ENDPOINT", GNANI_STT_ENDPOINT)
-        self.vad_threshold = vad_threshold if vad_threshold is not None else float(os.getenv("GNANI_VAD_THRESHOLD", "0.7"))
-        self.min_silence_ms = min_silence_ms if min_silence_ms is not None else int(os.getenv("GNANI_MIN_SILENCE_MS", "300"))
-        self.min_speech_ms = min_speech_ms if min_speech_ms is not None else int(os.getenv("GNANI_MIN_SPEECH_MS", "100"))
+        self.vad_threshold = vad_threshold if vad_threshold is not None else float(os.getenv("GNANI_VAD_THRESHOLD", "0.55"))
+        self.min_silence_ms = min_silence_ms if min_silence_ms is not None else int(os.getenv("GNANI_MIN_SILENCE_MS", "100"))
+        self.min_speech_ms = min_speech_ms if min_speech_ms is not None else int(os.getenv("GNANI_MIN_SPEECH_MS", "50"))
         self.min_segment_ms = min_segment_ms if min_segment_ms is not None else int(os.getenv("GNANI_MIN_SEGMENT_MS", "100"))
         if not 0.0 <= self.vad_threshold <= 1.0:
             raise ValueError("GNANI_VAD_THRESHOLD must be between 0.0 and 1.0")
