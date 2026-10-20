@@ -17,6 +17,7 @@ from gnaniassignment.llm.router import LAYA_GATEWAY_URL, LAYA_MODEL, LayaGateway
 from gnaniassignment.orchestration.graph import build_graph, select_intent
 from gnaniassignment.orchestration.session import TurnSession
 from gnaniassignment.pipeline.provider_benchmark import provider_from_event
+from gnaniassignment.pipeline.gnani_microphone import pcm_frames
 from gnaniassignment.pipeline.laya_benchmark import _same_execution_device
 from gnaniassignment.stt.gnani import GnaniProcessing, GnaniRealtimeStt, GnaniTranscript, GnaniTurnBridge, PCM_FRAME_BYTES
 
@@ -143,6 +144,18 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(socket.closed)
         self.assertEqual(events[0], GnaniProcessing(timestamp="2026-10-20T00:00:00Z"))
         self.assertEqual(events[1], GnaniTranscript("mera order kahan hai", "s-1", 0, 640, 111))
+
+    def test_microphone_pcm_frames_coalesce_partial_alsa_reads(self):
+        async def exercise():
+            reader = asyncio.StreamReader()
+            reader.feed_data(b"a" * 512)
+            reader.feed_data(b"b" * 1536)
+            reader.feed_eof()
+            return [frame async for frame in pcm_frames(reader)]
+
+        frames = asyncio.run(exercise())
+        self.assertEqual([len(frame) for frame in frames], [1024, 1024])
+        self.assertEqual(frames[0], b"a" * 512 + b"b" * 512)
     def test_laya_benchmark_treats_cuda_and_cuda_zero_as_same_device(self):
         self.assertTrue(_same_execution_device("cuda", "cuda:0"))
     def test_requested_cuda_fails_fast_when_runtime_is_unavailable(self):

@@ -78,6 +78,22 @@ uv run python -m gnaniassignment.pipeline.gnani_stt_diagnostic
 
 The expected result is `acknowledged_sample_rate: 16000`. Do not send audio at a different rate or cadence than the rate Gnani acknowledges.
 
+For a live Linux microphone test (no audio file is saved), run:
+
+```bash
+uv run python -m gnaniassignment.pipeline.gnani_microphone --seconds 8 --device plughw:1,0
+```
+
+Speak while it records. The runner coalesces arbitrary ALSA reads into Gnani's required 1,024-byte frames and prints only final transcript segments and STT latency.
+
+For an open, call-length connection, omit `--seconds` and end it with `Ctrl+C`:
+
+```bash
+uv run python -m gnaniassignment.pipeline.gnani_microphone --device plughw:1,0
+```
+
+Production telephony/WebRTC adapters should follow the same lifecycle: open one `GnaniRealtimeStt` context when the call begins, forward every incoming customer-audio frame through it, and close it only when the call ends. Each VAD-closed utterance is delivered as a separate `GnaniTranscript` on that persistent connection.
+
 ## Reusable decision models
 
 `gnaniassignment.decision` is the low-latency replacement for zero-shot routing when a voice workflow has a fixed taxonomy. Each decision point has a versioned catalog, a separately versioned labelled JSONL dataset, and one generated model bundle. The engine is reusable across flows; do not mix unrelated labels (for example, enquiry and call-control intents) into one classifier.
