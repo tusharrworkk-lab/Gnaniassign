@@ -1306,6 +1306,7 @@ source = { editable = "." }
 dependencies = [
     { name = "indic-transliteration" },
     { name = "langgraph" },
+    { name = "langsmith" },
     { name = "openai" },
     { name = "python-dotenv" },
     { name = "requests" },
@@ -1352,6 +1353,7 @@ requires-dist = [
     { name = "google-genai", marker = "extra == 'gemini'" },
     { name = "indic-transliteration", specifier = ">=2.3.82" },
     { name = "langgraph" },
+    { name = "langsmith", specifier = ">=0.14.7" },
     { name = "laya", marker = "extra == 'local-laya'" },
     { name = "laya", extras = ["fast"], marker = "extra == 'local-laya-fast'" },
     { name = "openai" },

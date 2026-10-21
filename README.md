@@ -86,6 +86,10 @@ uv run python -m gnaniassignment.pipeline.gnani_microphone \
 
 Every completed voice turn appends an audio-free JSONL record to `artifacts/voice-latency.jsonl`. It includes Gnani STT provider latency and segment duration, local intent time, LLM TTFT and stream duration, TTS time-to-first-audio, TTS stream completion, generated audio duration, and first playback write. The E2E fields are explicitly named: `pipeline_e2e_to_playback_first_write_ms` is the conversational latency target; `pipeline_e2e_to_tts_stream_complete_ms` is synthesis completion; `pipeline_e2e_to_playback_complete_ms` includes draining the remaining local speaker buffer.
 
+### LangSmith LLM traces
+
+LangSmith tracing is opt-in. Set `LANGSMITH_TRACING=true`, add `LANGSMITH_API_KEY` only to `.env`, and choose `LANGSMITH_PROJECT`. Each LangGraph invocation is traced, and every custom subagent model call records the exact system prompt, assembled user/context prompt, and raw provider output. Do not enable it for production customer calls unless sending those inputs and outputs to LangSmith is permitted by your data policy.
+
 `GnaniRealtimeStt` yields a final `GnaniTranscript` for each VAD-closed segment. `GnaniTurnBridge.handle()` immediately starts Laya and the selected subagent by default—the lowest-latency path. Use `handle_async()` from the WebSocket receiver so the synchronous LangGraph work does not block audio/event I/O. For a workflow that intentionally combines segments, construct the bridge with `auto_end_turn=False`, then call `end_turn()` explicitly. Gnani's `processing` event is useful to update the UI (for example, “transcribing…”), but it is not text and is never sent to Laya.
 
 Before sending telephony audio, verify that Gnani actually accepted the requested sample rate. This opens a connection but sends no PCM and appends the result to an ignored local log:

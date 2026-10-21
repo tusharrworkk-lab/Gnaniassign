@@ -10,6 +10,7 @@ from gnaniassignment.llm.agents.base import AgentResponse, SubAgent
 from gnaniassignment.llm.chat import ChatModel
 from gnaniassignment.llm.prompts.enquiry_agents import PROMPTS
 from gnaniassignment.llm.retrieval import EmptyRetriever, IntentScopedRetriever
+from gnaniassignment.observability.langsmith import trace_llm_call, trace_llm_stream
 
 MAX_KNOWLEDGE_CHARS = 6000
 MAX_SUMMARY_CHARS = 320
@@ -70,7 +71,14 @@ class EnquiryAgent(SubAgent):
 
     def reply(self, text: str, slots: dict[str, str], memory: str = "") -> AgentResponse:
         system_prompt, user_prompt = self._prompts(text, memory)
-        return self._parse_response(self.model.complete(system_prompt, user_prompt), text)
+        raw = trace_llm_call(
+            agent=self.name,
+            model=getattr(self.model, "model", None),
+            system=system_prompt,
+            user=user_prompt,
+            invoke=lambda: self.model.complete(system_prompt, user_prompt),
+        )
+        return self._parse_response(raw, text)
 
     def run_stream(self, text: str, slots: dict[str, str], memory: str, on_chunk: Callable[[str], None]) -> AgentResponse:
         self.calls += 1
@@ -84,7 +92,13 @@ class EnquiryAgent(SubAgent):
         raw_parts: list[str] = []
         structured: bool | None = None
         plain_answer_streamed = False
-        for chunk in stream_complete(system_prompt, user_prompt):
+        for chunk in trace_llm_stream(
+            agent=self.name,
+            model=getattr(self.model, "model", None),
+            system=system_prompt,
+            user=user_prompt,
+            invoke=lambda: stream_complete(system_prompt, user_prompt),
+        ):
             raw_parts.append(chunk)
             if structured is None:
                 joined = "".join(raw_parts).lstrip()

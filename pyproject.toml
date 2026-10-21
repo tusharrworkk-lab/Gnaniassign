@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     "indic-transliteration>=2.3.82",
     "langgraph",
+    "langsmith>=0.14.7",
     "openai",
     "python-dotenv",
     "requests",
