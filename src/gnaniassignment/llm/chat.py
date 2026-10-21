@@ -382,7 +382,7 @@ class BedrockChatModel:
             "system": [{"text": system}],
             "messages": [{"role": "user", "content": [{"text": user}]}],
             "inferenceConfig": {
-                "temperature": 0.2,
+                "temperature": float(os.getenv("BEDROCK_TEMPERATURE", "0.5")),
                 "maxTokens": int(os.getenv("BEDROCK_MAX_OUTPUT_TOKENS", "32")),
             },
         }

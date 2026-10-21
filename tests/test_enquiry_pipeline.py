@@ -11,6 +11,7 @@ from gnaniassignment.llm.chat import BedrockChatModel, CerebrasChatModel, DEFAUL
 from gnaniassignment.llm.memory import ChatTurn, render_memory, select_memory, topic_from_query
 from gnaniassignment.llm.local_laya import LocalLayaRouter, require_requested_cuda
 from gnaniassignment.llm.laya_cpp import DEFAULT_LAYA_CPP_MODEL, DEFAULT_LAYA_CPP_URL, LayaCppRouter
+from gnaniassignment.llm.agents.retail import retail_clarification_agent
 from gnaniassignment.llm.prompts.intents import QUESTIONS
 from gnaniassignment.llm.retrieval import IntentScopedRetriever
 from gnaniassignment.llm.router import LAYA_GATEWAY_URL, LAYA_MODEL, LayaGatewayRouter
@@ -197,8 +198,24 @@ class PipelineTests(unittest.TestCase):
         session = TurnSession(build_graph(router, enquiry_agents(chat), threshold=0.5))
         result = session.ask("Tell me about it")
         self.assertEqual(result["intent"], "clarify")
-        self.assertIn("clarify", result["spoken"].lower())
+        self.assertIn("order", result["spoken"].lower())
         self.assertEqual(chat.prompts, [])
+
+    def test_low_confidence_uses_configured_clarification_subagent(self):
+        router, chat = Router(confidence=0.2), Chat()
+        session = TurnSession(
+            build_graph(
+                router,
+                enquiry_agents(chat),
+                threshold=0.5,
+                clarification_agent=retail_clarification_agent(chat),
+            )
+        )
+        result = session.ask("Kya haal hai bhai?")
+        self.assertEqual(result["intent"], "clarify")
+        self.assertEqual(result["spoken"], "We operate in India.")
+        self.assertEqual(len(chat.prompts), 1)
+        self.assertIn("Kya haal hai bhai?", chat.prompts[0])
 
     def test_retry_keeps_buffered_query_and_does_not_duplicate_history(self):
         router, chat = Router(), Chat()

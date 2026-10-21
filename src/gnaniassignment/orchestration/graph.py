@@ -44,7 +44,12 @@ def select_intent(answers: dict[str, Any], threshold: float = THRESHOLD, allowed
     return choice if choice != "other" and confidence >= threshold else "clarify"
 
 
-def build_graph(router: IntentRouter, agents: dict[str, SubAgent], threshold: float = THRESHOLD):
+def build_graph(
+    router: IntentRouter,
+    agents: dict[str, SubAgent],
+    threshold: float = THRESHOLD,
+    clarification_agent: SubAgent | None = None,
+):
     if not agents:
         raise ValueError("At least one intent agent is required")
     if not 0 <= threshold <= 1:
@@ -69,11 +74,22 @@ def build_graph(router: IntentRouter, agents: dict[str, SubAgent], threshold: fl
         return {"spoken": state["replies"][0]["text"]}
 
     def clarify(state: TurnState, config: RunnableConfig) -> dict[str, Any]:
-        answer = "Could you clarify whether you mean the company or a product, and what you would like to know?"
         on_chunk = config.get("configurable", {}).get("on_answer_chunk")
-        if on_chunk is not None:
-            on_chunk(answer)
-        return {"replies": [{"agent": "clarify", "text": answer, "summary": "The question was unclear; awaiting clarification."}]}
+        if clarification_agent is None:
+            # Kept for callers that construct a graph without a clarification
+            # subagent. Production composition always supplies one.
+            answer = "Aap order, delivery, payment, product, return, refund ya cancellation ke baare mein kya jaanna chahte hain?"
+            if on_chunk is not None:
+                on_chunk(answer)
+            return {"replies": [{"agent": "clarify", "text": answer, "summary": "The question was unclear; awaiting clarification."}]}
+        slots = {"intent": "clarify", "topic": state["topic"]}
+        if on_chunk is None:
+            output = clarification_agent.run(state["text"], slots, state["memory"])
+        else:
+            output = clarification_agent.run_stream(state["text"], slots, state["memory"], on_chunk)
+        if isinstance(output, AgentResponse):
+            return {"replies": [{"agent": clarification_agent.name, "text": output.answer, "summary": output.memory_summary}]}
+        return {"replies": [{"agent": clarification_agent.name, "text": output, "summary": f"User asked: {state['text']}. Clarification: {output[:280]}"}]}
 
     graph = StateGraph(TurnState)
     graph.add_node("classify", classify)
