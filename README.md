@@ -68,6 +68,24 @@ uv sync --extra gnani-stt
 
 Set `GNANI_API_KEY` in `.env`. The configured pipeline is `en-IN` at `16000` Hz: signed-16-bit little-endian mono PCM, exactly 1,024 bytes every 32 ms. The raw WebSocket adapter sends `x-vad-*` headers, which the official Python SDK does not expose. `GNANI_MIN_SILENCE_MS=150` balances fast final segments with fewer splits at natural pauses; raise it to `200`–`300` if callers are still split. Do not burst buffered frames.
 
+### Gnani realtime TTS
+
+The TTS adapter uses Timbre v3 (`Shivani`) with `hi-en` and streams 24 kHz raw PCM—no audio file is created. Speak a Roman-Hinglish answer through the default ALSA output with:
+
+```bash
+uv run python -m gnaniassignment.pipeline.gnani_tts_speak \
+  "Aap apna order ID bhej dijiye, main uska status dekh leta hoon."
+```
+
+Run the complete local chain with `--with-tts`. Use headphones for this desktop test so outgoing TTS does not re-enter the microphone; a phone integration should instead use separate inbound and outbound audio tracks.
+
+```bash
+uv run python -m gnaniassignment.pipeline.gnani_microphone \
+  --device plughw:1,0 --with-llm --with-tts
+```
+
+Every completed voice turn appends an audio-free JSONL record to `artifacts/voice-latency.jsonl`. It includes Gnani STT provider latency and segment duration, local intent time, LLM TTFT and stream duration, TTS time-to-first-audio, TTS stream completion, generated audio duration, and first playback write. The E2E fields are explicitly named: `pipeline_e2e_to_playback_first_write_ms` is the conversational latency target; `pipeline_e2e_to_tts_stream_complete_ms` is synthesis completion; `pipeline_e2e_to_playback_complete_ms` includes draining the remaining local speaker buffer.
+
 `GnaniRealtimeStt` yields a final `GnaniTranscript` for each VAD-closed segment. `GnaniTurnBridge.handle()` immediately starts Laya and the selected subagent by default—the lowest-latency path. Use `handle_async()` from the WebSocket receiver so the synchronous LangGraph work does not block audio/event I/O. For a workflow that intentionally combines segments, construct the bridge with `auto_end_turn=False`, then call `end_turn()` explicitly. Gnani's `processing` event is useful to update the UI (for example, “transcribing…”), but it is not text and is never sent to Laya.
 
 Before sending telephony audio, verify that Gnani actually accepted the requested sample rate. This opens a connection but sends no PCM and appends the result to an ignored local log:

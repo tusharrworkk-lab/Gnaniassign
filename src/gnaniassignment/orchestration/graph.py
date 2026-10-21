@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from math import isfinite
 from typing import Any, TypedDict
 
@@ -25,6 +26,7 @@ class TurnState(TypedDict):
     memory: str
     replies: list[dict[str, str]]
     spoken: str | None
+    metrics: dict[str, float]
 
 
 def select_intent(answers: dict[str, Any], threshold: float = THRESHOLD, allowed_intents: tuple[str, ...] = INTENT_KEYS) -> str:
@@ -56,6 +58,7 @@ def build_graph(
         raise ValueError("Intent threshold must be between 0 and 1")
 
     def classify(state: TurnState) -> dict[str, Any]:
+        started = time.perf_counter()
         decision_context = {
             "recent_conversation": [turn.summary[:320] for turn in state["history"][-2:]],
             "current_query": state["text"],
@@ -65,7 +68,13 @@ def build_graph(
         topic = topic_from_query(state["text"])
         if topic == "general" and state["history"] and state["history"][-1].intent == intent:
             topic = state["history"][-1].topic
-        return {"answers": answers, "intent": intent, "topic": topic, "memory": render_memory(select_memory(state["history"], intent, topic))}
+        return {
+            "answers": answers,
+            "intent": intent,
+            "topic": topic,
+            "memory": render_memory(select_memory(state["history"], intent, topic)),
+            "metrics": {"intent_ms": (time.perf_counter() - started) * 1000},
+        }
 
     def route(state: TurnState) -> str:
         return state["intent"]
@@ -74,6 +83,7 @@ def build_graph(
         return {"spoken": state["replies"][0]["text"]}
 
     def clarify(state: TurnState, config: RunnableConfig) -> dict[str, Any]:
+        started = time.perf_counter()
         on_chunk = config.get("configurable", {}).get("on_answer_chunk")
         if clarification_agent is None:
             # Kept for callers that construct a graph without a clarification
@@ -81,15 +91,17 @@ def build_graph(
             answer = "Aap order, delivery, payment, product, return, refund ya cancellation ke baare mein kya jaanna chahte hain?"
             if on_chunk is not None:
                 on_chunk(answer)
-            return {"replies": [{"agent": "clarify", "text": answer, "summary": "The question was unclear; awaiting clarification."}]}
+            return {"replies": [{"agent": "clarify", "text": answer, "summary": "The question was unclear; awaiting clarification."}], "metrics": {**state["metrics"], "agent_ms": (time.perf_counter() - started) * 1000}}
         slots = {"intent": "clarify", "topic": state["topic"]}
         if on_chunk is None:
             output = clarification_agent.run(state["text"], slots, state["memory"])
         else:
             output = clarification_agent.run_stream(state["text"], slots, state["memory"], on_chunk)
         if isinstance(output, AgentResponse):
-            return {"replies": [{"agent": clarification_agent.name, "text": output.answer, "summary": output.memory_summary}]}
-        return {"replies": [{"agent": clarification_agent.name, "text": output, "summary": f"User asked: {state['text']}. Clarification: {output[:280]}"}]}
+            reply = {"agent": clarification_agent.name, "text": output.answer, "summary": output.memory_summary}
+        else:
+            reply = {"agent": clarification_agent.name, "text": output, "summary": f"User asked: {state['text']}. Clarification: {output[:280]}"}
+        return {"replies": [reply], "metrics": _agent_metrics(state["metrics"], clarification_agent, started)}
 
     graph = StateGraph(TurnState)
     graph.add_node("classify", classify)
@@ -107,6 +119,7 @@ def build_graph(
 
 def _agent_node(agent: SubAgent):
     def node(state: TurnState, config: RunnableConfig) -> dict[str, Any]:
+        started = time.perf_counter()
         on_chunk = config.get("configurable", {}).get("on_answer_chunk")
         slots = {"intent": state["intent"], "topic": state["topic"]}
         if on_chunk is None:
@@ -114,7 +127,21 @@ def _agent_node(agent: SubAgent):
         else:
             output = agent.run_stream(state["text"], slots, state["memory"], on_chunk)
         if isinstance(output, AgentResponse):
-            return {"replies": [{"agent": agent.name, "text": output.answer, "summary": output.memory_summary}]}
-        return {"replies": [{"agent": agent.name, "text": output, "summary": f"User asked: {state['text']}. Answer: {output[:280]}"}]}
+            reply = {"agent": agent.name, "text": output.answer, "summary": output.memory_summary}
+        else:
+            reply = {"agent": agent.name, "text": output, "summary": f"User asked: {state['text']}. Answer: {output[:280]}"}
+        return {"replies": [reply], "metrics": _agent_metrics(state["metrics"], agent, started)}
 
     return node
+
+
+def _agent_metrics(existing: dict[str, float], agent: SubAgent, started: float) -> dict[str, float]:
+    """Attach provider timing exposed by streaming models without coupling ports."""
+    metrics = {**existing, "agent_ms": (time.perf_counter() - started) * 1000}
+    first_token = getattr(getattr(agent, "model", None), "last_first_token_ms", None)
+    stream_total = getattr(getattr(agent, "model", None), "last_stream_ms", None)
+    if isinstance(first_token, (int, float)):
+        metrics["llm_ttft_ms"] = float(first_token)
+    if isinstance(stream_total, (int, float)):
+        metrics["llm_stream_ms"] = float(stream_total)
+    return metrics

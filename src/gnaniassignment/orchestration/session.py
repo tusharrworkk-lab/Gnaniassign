@@ -26,7 +26,7 @@ class TurnSession:
             return {"spoken": None, "replies": []}
         text = " ".join(self.phrases)
         config = {"configurable": {"on_answer_chunk": on_chunk}} if on_chunk is not None else None
-        result = self.graph.invoke({"text": text, "answers": {}, "intent": "", "topic": "", "history": self.history, "memory": "", "replies": [], "spoken": None}, config=config)
+        result = self.graph.invoke({"text": text, "answers": {}, "intent": "", "topic": "", "history": self.history, "memory": "", "replies": [], "spoken": None, "metrics": {}}, config=config)
         reply_data = result["replies"][0]
         reply = reply_data["text"]
         self.history.append(ChatTurn(query=text, answer=reply, summary=reply_data["summary"], intent=result["intent"], topic=result["topic"]))

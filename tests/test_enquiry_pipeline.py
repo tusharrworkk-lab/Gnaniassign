@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from types import SimpleNamespace
 
@@ -21,6 +22,7 @@ from gnaniassignment.pipeline.provider_benchmark import provider_from_event
 from gnaniassignment.pipeline.gnani_microphone import pcm_frames
 from gnaniassignment.pipeline.laya_benchmark import _same_execution_device
 from gnaniassignment.stt.gnani import GnaniProcessing, GnaniRealtimeStt, GnaniTranscript, GnaniTurnBridge, PCM_FRAME_BYTES
+from gnaniassignment.tts.gnani import GnaniRealtimeTts
 
 
 class Router:
@@ -104,6 +106,48 @@ class PipelineTests(unittest.TestCase):
 
     def test_gnani_pcm_frame_size_is_fixed(self):
         self.assertEqual(PCM_FRAME_BYTES, 1024)
+
+    def test_gnani_timbre_v3_tts_decodes_audio_chunks(self):
+        captured: dict[str, object] = {}
+
+        class Socket:
+            def __init__(self):
+                self.sent: list[str] = []
+                self.messages = [
+                    '{"type":"start","message":"Streaming started"}',
+                    '{"type":"audio","data":{"chunk_index":1,"audio":"YWJj","is_final":false}}',
+                    '{"type":"complete","data":{"chunk_index":2,"audio":"","is_final":true}}',
+                ]
+
+            async def send(self, message):
+                self.sent.append(message)
+
+            async def recv(self):
+                return self.messages.pop(0)
+
+            async def close(self):
+                return None
+
+        async def connect(endpoint, headers):
+            captured["endpoint"] = endpoint
+            captured["headers"] = headers
+            socket = Socket()
+            captured["socket"] = socket
+            return socket
+
+        async def synthesize():
+            async with GnaniRealtimeTts(api_key="test-key", connect=connect) as tts:
+                return [chunk async for chunk in tts.synthesize("Mera order kahan hai?")]
+
+        chunks = asyncio.run(synthesize())
+        self.assertEqual(chunks[0].audio, b"abc")
+        self.assertEqual(chunks[0].chunk_index, 1)
+        self.assertEqual(captured["headers"], {"X-API-Key-ID": "test-key", "Content-Type": "application/json"})
+        request = json.loads(captured["socket"].sent[0])
+        self.assertEqual(request["model"], "timbre-v3.0")
+        self.assertEqual(request["voice"], "Shivani")
+        self.assertEqual(request["language"], "hi-en")
+        self.assertEqual(request["audio_config"]["container"], "raw")
 
     def test_gnani_16khz_raw_websocket_headers_and_events(self):
         captured: dict[str, object] = {}
