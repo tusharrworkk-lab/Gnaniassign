@@ -50,21 +50,37 @@ async def run(seconds: int | None, device: str, with_llm: bool = False, with_tts
 
     transcripts: list[GnaniTranscript] = []
     async with stt:
+        processing_received_at: float | None = None
+
         async def receive() -> None:
+            nonlocal processing_received_at
             async for event in stt.events():
                 if isinstance(event, GnaniProcessing):
+                    processing_received_at = time.perf_counter()
                     print("stt: processing", flush=True)
                     write_voice_metric({"event": "stt_processing"})
                 elif isinstance(event, GnaniTranscript):
-                    turn_started = time.perf_counter()
+                    final_received_at = time.perf_counter()
+                    turn_started = final_received_at
                     transcripts.append(event)
                     print(f"transcript: {event.text}", flush=True)
                     print(f"stt_latency_ms: {event.latency_ms}", flush=True)
-                    write_voice_metric({
+                    stt_metrics: dict[str, float | int | None] = {
                         "event": "stt_final",
                         "stt_provider_latency_ms": event.latency_ms,
                         "stt_audio_duration_ms": event.audio_duration_ms,
-                    })
+                    }
+                    if processing_received_at is not None:
+                        stt_metrics["stt_post_vad_to_final_ms"] = (final_received_at - processing_received_at) * 1000
+                    if event.audio_duration_ms is not None and processing_received_at is not None:
+                        # Approximation only: Gnani does not provide the local speech-onset
+                        # timestamp. This combines utterance duration, configured VAD tail,
+                        # and the observed post-VAD finalization interval.
+                        stt_metrics["stt_estimated_speech_start_to_final_ms"] = (
+                            event.audio_duration_ms + stt.min_silence_ms + (final_received_at - processing_received_at) * 1000
+                        )
+                    write_voice_metric(stt_metrics)
+                    processing_received_at = None
                     if bridge is not None and event.text.strip():
                         print("pipeline: routing and generating", flush=True)
                         first_answer_chunk_at: float | None = None
@@ -89,6 +105,11 @@ async def run(seconds: int | None, device: str, with_llm: bool = False, with_tts
                                 "intent": result["intent"],
                                 "stt_provider_latency_ms": event.latency_ms,
                                 "stt_audio_duration_ms": event.audio_duration_ms,
+                                **{
+                                    key: value
+                                    for key, value in stt_metrics.items()
+                                    if key.startswith("stt_")
+                                },
                                 "pipeline_e2e_to_llm_complete_ms": (llm_completed_at - turn_started) * 1000,
                                 **result.get("metrics", {}),
                             }
