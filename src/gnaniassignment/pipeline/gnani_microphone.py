@@ -14,6 +14,11 @@ from gnaniassignment.pipeline.gnani_tts_speak import speak
 from gnaniassignment.pipeline.voice_metrics import write_voice_metric
 
 
+def _ms(value: object) -> str:
+    """Render an optional latency value for live terminal diagnostics."""
+    return f"{float(value):.0f} ms" if isinstance(value, (int, float)) else "n/a"
+
+
 async def pcm_frames(reader: asyncio.StreamReader, input_enabled: asyncio.Event | None = None) -> AsyncIterator[bytes]:
     """Coalesce arbitrary ALSA pipe reads into Gnani's fixed 1,024-byte frames."""
     buffered = bytearray()
@@ -81,7 +86,7 @@ async def run(
                     turn_started = final_received_at
                     transcripts.append(event)
                     print(f"transcript: {event.text}", flush=True)
-                    print(f"stt_latency_ms: {event.latency_ms}", flush=True)
+                    print(f"metrics | STT final: {_ms(event.latency_ms)} | end-of-turn target: {stt.min_silence_ms} ms", flush=True)
                     stt_metrics: dict[str, float | int | None] = {
                         "event": "stt_final",
                         "end_of_turn_target_ms": stt.min_silence_ms,
@@ -89,6 +94,10 @@ async def run(
                     }
                     if processing_received_at is not None:
                         stt_metrics["transcription_post_vad_to_final_ms"] = (final_received_at - processing_received_at) * 1000
+                        print(
+                            f"metrics | VAD close → final transcript: {_ms(stt_metrics['transcription_post_vad_to_final_ms'])}",
+                            flush=True,
+                        )
                     write_voice_metric(stt_metrics)
                     processing_received_at = None
                     if bridge is not None and event.text.strip():
@@ -103,6 +112,10 @@ async def run(
                                     "event": "llm_first_token",
                                     "pipeline_e2e_to_llm_ttft_ms": (first_answer_chunk_at - turn_started) * 1000,
                                 })
+                                print(
+                                    f"metrics | LLM TTFT: {_ms((first_answer_chunk_at - turn_started) * 1000)}",
+                                    flush=True,
+                                )
                             print(chunk, end="", flush=True)
 
                         result = await bridge.handle_async(event, on_chunk=show_answer)
@@ -125,6 +138,12 @@ async def run(
                                     if isinstance(metrics["tts_ttfa_ms"], (int, float)):
                                         live["pipeline_e2e_to_tts_first_audio_ms"] = (tts_started - turn_started) * 1000 + metrics["tts_ttfa_ms"]
                                     write_voice_metric(live)
+                                    print(
+                                        "metrics | "
+                                        f"TTS TTFB: {_ms(metrics['tts_ttfa_ms'])} | "
+                                        f"final transcript → audible audio: {_ms(live.get('pipeline_e2e_to_tts_first_audio_ms'))}",
+                                        flush=True,
+                                    )
 
                                 if suppress_stt_during_tts:
                                     input_enabled.clear()
@@ -143,6 +162,13 @@ async def run(
                                             stt.min_silence_ms + record["transcription_post_vad_to_final_ms"] + e2e
                                         )
                             path = write_voice_metric(record)
+                            print(
+                                "metrics | turn summary | "
+                                f"LLM TTFT: {_ms(record.get('llm_ttft_ms'))} | "
+                                f"TTS TTFB: {_ms(record.get('tts_ttfb_ms'))} | "
+                                f"speech-end → audible audio: {_ms(record.get('estimated_e2e_speech_end_to_playback_ms'))}",
+                                flush=True,
+                            )
                             print(f"metrics_log: {path}", flush=True)
                 elif isinstance(event, GnaniError):
                     print(f"stt_error: {event.message}", flush=True)
