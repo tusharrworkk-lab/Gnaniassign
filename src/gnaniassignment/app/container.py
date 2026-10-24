@@ -7,6 +7,7 @@ from gnaniassignment.llm.agents.enquiry import enquiry_agents
 from gnaniassignment.llm.agents.retail import retail_agents, retail_clarification_agent
 from gnaniassignment.llm.chat import BedrockChatModel, CerebrasChatModel, ChatModel, GroqChatModel, SimplismartChatModel, VercelGatewayChatModel, VertexGeminiChatModel, VllmGemmaChatModel
 from gnaniassignment.llm.laya_cpp import LayaCppRouter
+from gnaniassignment.llm.laya_lambda import LayaLambdaRouter
 from gnaniassignment.llm.local_laya import LocalLayaRouter
 from gnaniassignment.llm.retail_classifier import HinglishRetailRouter
 from gnaniassignment.llm.router import LayaGatewayRouter
@@ -15,7 +16,7 @@ from gnaniassignment.orchestration.graph import build_graph
 from gnaniassignment.orchestration.session import TurnSession
 
 
-def create_intent_router(settings: Settings) -> LayaGatewayRouter | LocalLayaRouter | LayaCppRouter | HinglishRetailRouter:
+def create_intent_router(settings: Settings) -> LayaGatewayRouter | LocalLayaRouter | LayaCppRouter | LayaLambdaRouter | HinglishRetailRouter:
     if settings.intent_provider == "hinglish_retail":
         router = HinglishRetailRouter()
         router.warmup()
@@ -24,9 +25,11 @@ def create_intent_router(settings: Settings) -> LayaGatewayRouter | LocalLayaRou
         return LocalLayaRouter()
     if settings.intent_provider == "laya_cpp":
         return LayaCppRouter()
+    if settings.intent_provider == "laya_lambda":
+        return LayaLambdaRouter()
     if settings.intent_provider == "laya":
         return LayaGatewayRouter()
-    raise ValueError("INTENT_PROVIDER must be 'hinglish_retail', 'local_laya', 'laya_cpp', or 'laya'.")
+    raise ValueError("INTENT_PROVIDER must be 'hinglish_retail', 'local_laya', 'laya_cpp', 'laya_lambda', or 'laya'.")
 
 
 def create_chat_model(settings: Settings) -> ChatModel:

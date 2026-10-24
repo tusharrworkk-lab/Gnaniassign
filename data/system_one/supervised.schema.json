@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["decision_point", "taxonomy_version", "text", "action", "language", "source", "group_id"],
+  "properties": {
+    "decision_point": {"type": "string", "minLength": 1},
+    "taxonomy_version": {"type": "string", "minLength": 1},
+    "text": {"type": "string", "minLength": 1},
+    "action": {"type": "string", "minLength": 1},
+    "language": {"enum": ["hi", "hinglish", "en", "mixed", "unknown"]},
+    "asr_quality": {"enum": ["clean", "asr_variant", "short_turn", "noisy", "unknown"]},
+    "source": {"enum": ["human_review", "synthetic_seed", "production_review"]},
+    "group_id": {"type": "string", "minLength": 1}
+  },
+  "additionalProperties": false
+}

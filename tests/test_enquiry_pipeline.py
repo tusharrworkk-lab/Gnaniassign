@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import unittest
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from gnaniassignment.llm.chat import BedrockChatModel, CerebrasChatModel, DEFAUL
 from gnaniassignment.llm.memory import ChatTurn, render_memory, select_memory, topic_from_query
 from gnaniassignment.llm.local_laya import LocalLayaRouter, require_requested_cuda
 from gnaniassignment.llm.laya_cpp import DEFAULT_LAYA_CPP_MODEL, DEFAULT_LAYA_CPP_URL, LayaCppRouter
+from gnaniassignment.llm.laya_lambda import LayaLambdaRouter
 from gnaniassignment.llm.agents.retail import retail_clarification_agent
 from gnaniassignment.llm.prompts.intents import QUESTIONS
 from gnaniassignment.llm.retrieval import IntentScopedRetriever
@@ -385,6 +387,20 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer local-key")
         self.assertEqual(kwargs["json"], {"model": DEFAULT_LAYA_CPP_MODEL, "state": state, "questions": QUESTIONS})
         self.assertEqual(result["answers"]["intent"]["choice"], "user_core")
+
+    def test_laya_lambda_adapter_invokes_private_function(self):
+        captured: dict[str, object] = {}
+
+        class Client:
+            def invoke(self, **kwargs):
+                captured.update(kwargs)
+                return {"Payload": io.BytesIO(b'{"statusCode":200,"body":"{\\\"answers\\\":{\\\"intent\\\":{\\\"choice\\\":\\\"track_order\\\"}}}"}')}
+
+        router = LayaLambdaRouter(function_name="test-laya", client=Client())
+        result = router.predict("mera order kahan hai", {"intent": {"type": "choice"}})
+        self.assertEqual(result["answers"]["intent"]["choice"], "track_order")
+        self.assertEqual(captured["FunctionName"], "test-laya")
+        self.assertEqual(captured["InvocationType"], "RequestResponse")
 
     def test_llama_subagent_uses_vercel_gateway_client(self):
         class ChatResource:

@@ -1,0 +1,34 @@
+# Exclude repository/runtime files that are unrelated to the Lambda image.
+.git
+.venv
+.agents
+.aws
+.codex
+artifacts
+brain_notes
+configs
+data
+pipeline
+src
+tests
+README.md
+pyproject.toml
+uv.lock
+
+# Keep laya.cpp source, but omit development/runtime artefacts and the unused
+# English checkpoint. The only model shipped is models/laya/multilingual.
+local/gemma
+local/laya.cpp/laya-cli
+local/laya.cpp/source/.git
+local/laya.cpp/source/.venv
+local/laya.cpp/source/build*
+local/laya.cpp/source/benchmarks
+local/laya.cpp/source/docs
+local/laya.cpp/source/tests
+local/laya.cpp/source/.github
+local/laya.cpp/source/models/laya/.cache
+local/laya.cpp/source/models/laya/model.safetensors
+local/laya.cpp/source/models/laya/REVISION
+local/laya.cpp/source/models/laya/rl_agent_config.json
+local/laya.cpp/source/models/laya/tokenizer
+local/laya.cpp/source/models/laya/encoder

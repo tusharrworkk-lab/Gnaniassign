@@ -1,0 +1,3 @@
+{"decision_point":"retail_intent","taxonomy_version":"retail-v1","text":"delivery kab aayegi","action":"track_order","language":"hinglish","asr_quality":"clean","source":"human_review","group_id":"track-cal-001"}
+{"decision_point":"retail_intent","taxonomy_version":"retail-v1","text":"coupon apply nahi ho raha","action":"discount_query","language":"hinglish","asr_quality":"asr_variant","source":"human_review","group_id":"discount-cal-001"}
+{"decision_point":"retail_intent","taxonomy_version":"retail-v1","text":"theek hai","action":"other","language":"hinglish","asr_quality":"short_turn","source":"human_review","group_id":"other-cal-001"}

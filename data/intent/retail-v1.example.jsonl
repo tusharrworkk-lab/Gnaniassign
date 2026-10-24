@@ -1,0 +1,26 @@
+{"text":"mera order cancel karna hai","intent":"cancel_order","language":"hinglish","source":"seed","group_id":"cancel-001"}
+{"text":"please cancel my order","intent":"cancel_order","language":"en","source":"seed","group_id":"cancel-002"}
+{"text":"product damaged aaya hai","intent":"damaged_item","language":"hinglish","source":"seed","group_id":"damaged-001"}
+{"text":"my item is broken","intent":"damaged_item","language":"en","source":"seed","group_id":"damaged-002"}
+{"text":"mera parcel abhi tak nahi aaya","intent":"delivery_complaint","language":"hinglish","source":"seed","group_id":"delivery-001"}
+{"text":"the delivery is late","intent":"delivery_complaint","language":"en","source":"seed","group_id":"delivery-002"}
+{"text":"koi discount milega kya","intent":"discount_query","language":"hinglish","source":"seed","group_id":"discount-001"}
+{"text":"do you have a coupon","intent":"discount_query","language":"en","source":"seed","group_id":"discount-002"}
+{"text":"is product ko exchange karna hai","intent":"exchange_product","language":"hinglish","source":"seed","group_id":"exchange-001"}
+{"text":"I want to exchange this item","intent":"exchange_product","language":"en","source":"seed","group_id":"exchange-002"}
+{"text":"haan","intent":"other","language":"hinglish","source":"seed","group_id":"other-affirm-001"}
+{"text":"tell me a joke","intent":"other","language":"en","source":"seed","group_id":"other-chat-001"}
+{"text":"payment fail ho gaya","intent":"payment_issue","language":"hinglish","source":"seed","group_id":"payment-001"}
+{"text":"my payment is pending","intent":"payment_issue","language":"en","source":"seed","group_id":"payment-002"}
+{"text":"ye item stock mein hai kya","intent":"product_availability","language":"hinglish","source":"seed","group_id":"availability-001"}
+{"text":"is this product available","intent":"product_availability","language":"en","source":"seed","group_id":"availability-002"}
+{"text":"iske features kya hain","intent":"product_information","language":"hinglish","source":"seed","group_id":"info-001"}
+{"text":"tell me about this product","intent":"product_information","language":"en","source":"seed","group_id":"info-002"}
+{"text":"mera refund kahan hai","intent":"refund_status","language":"hinglish","source":"seed","group_id":"refund-001"}
+{"text":"when will I get my refund","intent":"refund_status","language":"en","source":"seed","group_id":"refund-002"}
+{"text":"mujhe item return karna hai","intent":"return_request","language":"hinglish","source":"seed","group_id":"return-001"}
+{"text":"I need to return my order","intent":"return_request","language":"en","source":"seed","group_id":"return-002"}
+{"text":"mera order kahan hai","intent":"track_order","language":"hinglish","source":"seed","group_id":"track-001"}
+{"text":"track my shipment","intent":"track_order","language":"en","source":"seed","group_id":"track-002"}
+{"text":"mujhe galat product mila","intent":"wrong_item","language":"hinglish","source":"seed","group_id":"wrong-001"}
+{"text":"I received the wrong item","intent":"wrong_item","language":"en","source":"seed","group_id":"wrong-002"}

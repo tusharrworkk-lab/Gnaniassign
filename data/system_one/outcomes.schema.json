@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["decision_id", "timestamp", "decision_point", "taxonomy_version", "model_version", "candidate_actions", "selected_action", "policy_probability", "scores", "outcome_source", "reward_vector", "eligible_for_policy_learning"],
+  "properties": {
+    "decision_id": {"type": "string", "minLength": 1},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "decision_point": {"type": "string", "minLength": 1},
+    "taxonomy_version": {"type": "string", "minLength": 1},
+    "model_version": {"type": "string", "minLength": 1},
+    "context": {"type": "object"},
+    "candidate_actions": {"type": "array", "minItems": 2, "items": {"type": "string"}},
+    "selected_action": {"type": "string", "minLength": 1},
+    "policy_probability": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+    "scores": {"type": "object", "additionalProperties": {"type": "number"}},
+    "outcome_source": {"enum": ["human_review", "customer_signal", "system_event"]},
+    "reward_vector": {"type": "object", "additionalProperties": {"type": "number"}},
+    "eligible_for_policy_learning": {"type": "boolean"}
+  },
+  "additionalProperties": false
+}

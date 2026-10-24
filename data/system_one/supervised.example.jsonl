@@ -1,0 +1,6 @@
+{"decision_point":"retail_intent","taxonomy_version":"retail-v1","text":"mera order kahan hai","action":"track_order","language":"hinglish","asr_quality":"clean","source":"human_review","group_id":"track-001"}
+{"decision_point":"retail_intent","taxonomy_version":"retail-v1","text":"where is my parcel","action":"track_order","language":"en","asr_quality":"clean","source":"human_review","group_id":"track-002"}
+{"decision_point":"retail_intent","taxonomy_version":"retail-v1","text":"payment kat gaya but order nahi hua","action":"payment_issue","language":"hinglish","asr_quality":"clean","source":"human_review","group_id":"payment-001"}
+{"decision_point":"retail_intent","taxonomy_version":"retail-v1","text":"mujhe galat item mila","action":"wrong_item","language":"hinglish","asr_quality":"clean","source":"human_review","group_id":"wrong-item-001"}
+{"decision_point":"retail_intent","taxonomy_version":"retail-v1","text":"haan","action":"other","language":"hinglish","asr_quality":"short_turn","source":"human_review","group_id":"affirm-001"}
+{"decision_point":"retail_intent","taxonomy_version":"retail-v1","text":"mujhe ek joke sunao","action":"other","language":"hinglish","asr_quality":"clean","source":"human_review","group_id":"oos-joke-001"}

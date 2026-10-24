@@ -1,0 +1,20 @@
+{
+  "name": "retail-voice-intents",
+  "version": "v1",
+  "labels": [
+    "cancel_order",
+    "damaged_item",
+    "delivery_complaint",
+    "discount_query",
+    "exchange_product",
+    "other",
+    "payment_issue",
+    "product_availability",
+    "product_information",
+    "refund_status",
+    "return_request",
+    "track_order",
+    "wrong_item"
+  ],
+  "fallback_label": "other"
+}

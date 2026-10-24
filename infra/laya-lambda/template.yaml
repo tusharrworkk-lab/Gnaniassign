@@ -1,0 +1,34 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Private, low-traffic CPU deployment of laya.cpp multilingual System One.
+
+Parameters:
+  FunctionName:
+    Type: String
+    Default: gnani-laya-multilingual
+
+Resources:
+  LayaDecisionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Ref FunctionName
+      PackageType: Image
+      Architectures: [x86_64]
+      MemorySize: 4096
+      Timeout: 30
+      ReservedConcurrentExecutions: 2
+      EphemeralStorage:
+        Size: 512
+      Environment:
+        Variables:
+          LAYA_VARIANT: multilingual
+    Metadata:
+      DockerTag: laya-multilingual-cpu-v1
+      DockerContext: ../..
+      Dockerfile: infra/laya-lambda/Dockerfile
+
+Outputs:
+  LayaDecisionFunctionName:
+    Value: !Ref LayaDecisionFunction
+  LayaDecisionFunctionArn:
+    Value: !GetAtt LayaDecisionFunction.Arn
