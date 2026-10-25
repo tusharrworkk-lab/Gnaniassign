@@ -288,3 +288,8 @@ Conversation history is in memory per `TurnSession` and is capped at 100 turns. 
 ```bash
 uv run python -m unittest discover -s tests -v
 ```
+uv run python -m gnaniassignment.decision.train_system_one_indic \
+  --epochs 3 \
+  --batch-size 8 \
+  --output artifacts/models/systemone-indic-v1 \
+  2>&1 | tee artifacts/systemone-indic-training.log

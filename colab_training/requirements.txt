@@ -1,0 +1,7 @@
+# Google Colab already provides a CUDA-enabled PyTorch build. Do not install
+# torch here: pip may replace it with a CPU build.
+transformers>=4.46,<5
+datasets>=3,<5
+sentencepiece>=0.2
+safetensors>=0.4
+tqdm>=4.66
