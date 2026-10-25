@@ -12,6 +12,7 @@ from langgraph.graph import END, START, StateGraph
 from gnaniassignment.domain.ports import IntentRouter
 from gnaniassignment.llm.agents import AgentResponse, SubAgent
 from gnaniassignment.llm.memory import ChatTurn, render_memory, select_memory, topic_from_query
+from gnaniassignment.orchestration.working_memory import render_working_memory, update_working_memory
 from gnaniassignment.llm.prompts.intents import INTENT_KEYS, QUESTIONS
 
 THRESHOLD = 0.5
@@ -23,6 +24,7 @@ class TurnState(TypedDict):
     intent: str
     topic: str
     history: list[ChatTurn]
+    working_memory: dict[str, str]
     memory: str
     replies: list[dict[str, str]]
     spoken: str | None
@@ -68,11 +70,13 @@ def build_graph(
         topic = topic_from_query(state["text"])
         if topic == "general" and state["history"] and state["history"][-1].intent == intent:
             topic = state["history"][-1].topic
+        working_memory = update_working_memory(state["working_memory"], state["text"], intent, topic)
         return {
             "answers": answers,
             "intent": intent,
             "topic": topic,
-            "memory": render_memory(select_memory(state["history"], intent, topic)),
+            "working_memory": working_memory,
+            "memory": render_working_memory(working_memory) + "\n\n" + render_memory(select_memory(state["history"], intent, topic)),
             "metrics": {"intent_ms": (time.perf_counter() - started) * 1000},
         }
 

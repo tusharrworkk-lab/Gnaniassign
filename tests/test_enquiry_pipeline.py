@@ -290,6 +290,28 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(render_memory(selected).count("Memory:"), 4)
         self.assertEqual(topic_from_query("Somewhere else?"), "general")
 
+    def test_session_restores_and_persists_episodic_memory(self):
+        class MemoryStore:
+            def __init__(self):
+                self.loaded_for: tuple[str, int] | None = None
+                self.saved: list[tuple[str, str, ChatTurn]] = []
+
+            def load_recent(self, customer_id: str, limit: int) -> list[ChatTurn]:
+                self.loaded_for = (customer_id, limit)
+                return [ChatTurn("Earlier coverage question", "India", "Coverage: India", "user_core", "coverage")]
+
+            def append(self, customer_id: str, session_id: str, turn: ChatTurn) -> None:
+                self.saved.append((customer_id, session_id, turn))
+
+        store = MemoryStore()
+        session = TurnSession(build_graph(Router(), enquiry_agents(Chat())), memory_store=store, customer_id="mock-customer-001")
+        self.assertEqual(store.loaded_for, ("mock-customer-001", 100))
+        self.assertEqual(len(session.history), 1)
+        session.ask("Where do you operate?")
+        self.assertEqual(len(store.saved), 1)
+        self.assertEqual(store.saved[0][0], "mock-customer-001")
+        self.assertEqual(store.saved[0][2].intent, "user_core")
+
     def test_invalid_laya_confidence_is_rejected(self):
         scores = {"intent": {"choice": "user_core", "confidence": float("nan")}}
         with self.assertRaises(ValueError):

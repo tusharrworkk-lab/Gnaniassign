@@ -120,7 +120,15 @@ class EnquiryAgent(SubAgent):
     def _prompts(self, text: str, memory: str) -> tuple[str, str]:
         retrieved = self.retriever.retrieve(self.name, text, limit=4)
         knowledge = ("\n\n".join(retrieved) or self.knowledge)[:MAX_KNOWLEDGE_CHARS]
-        user_prompt = f"Approved knowledge:\n{knowledge}\n\nRelevant conversation:\n{memory}\n\nCurrent user query:\n{text}"
+        provided = []
+        if "- order_id:" in memory:
+            provided.append("order ID")
+        if "- payment_reference:" in memory:
+            provided.append("payment reference")
+        slot_rule = ""
+        if provided:
+            slot_rule = f"\n\nMANDATORY: The following fields are already provided in Working memory: {', '.join(provided)}. Do not ask the customer for any of them again."
+        user_prompt = f"Approved knowledge:\n{knowledge}\n\nRelevant conversation:\n{memory}\n\nCurrent user query:\n{text}{slot_rule}"
         return self.system_prompt, user_prompt
 
     @staticmethod

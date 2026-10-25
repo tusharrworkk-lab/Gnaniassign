@@ -6,13 +6,15 @@ import argparse
 import time
 
 from gnaniassignment.app.config import Settings, load_environment
-from gnaniassignment.app.container import create_chat_model, create_intent_router
+from gnaniassignment.app.container import create_chat_model, create_episodic_memory_store, create_intent_router
 from gnaniassignment.llm.agents.enquiry import enquiry_agents
 from gnaniassignment.llm.agents.retail import retail_agents
+from gnaniassignment.llm.agents.retail_minilm import retail_minilm_agents
 from gnaniassignment.llm.chat import ChatModel
 from gnaniassignment.llm.laya_cpp import LayaCppRouter
 from gnaniassignment.llm.local_laya import LocalLayaRouter
 from gnaniassignment.llm.retail_classifier import HinglishRetailRouter
+from gnaniassignment.llm.retail_minilm import RetailMiniLMRouter
 from gnaniassignment.llm.router import LayaGatewayRouter
 from gnaniassignment.orchestration.graph import build_graph
 from gnaniassignment.orchestration.session import TurnSession
@@ -32,18 +34,19 @@ def main() -> None:
     if isinstance(router, LocalLayaRouter):
         print(f"Local Laya load: {router.load_ms:.0f} ms (outside turn timing)")
     model = create_chat_model(settings)
-    agents = retail_agents(model) if settings.intent_provider == "hinglish_retail" else enquiry_agents(model)
+    agents = retail_agents(model) if settings.intent_provider == "hinglish_retail" else retail_minilm_agents(model) if settings.intent_provider == "retail_minilm" else enquiry_agents(model)
     graph = build_graph(router, agents, threshold=settings.intent_threshold)
     for run in range(args.runs):
         if args.runs > 1:
             print(f"run {run + 1}/{args.runs}")
-        session = TurnSession(graph)
+        memory_store, customer_id = create_episodic_memory_store()
+        session = TurnSession(graph, memory_store=memory_store, customer_id=customer_id)
         _run_turn(session, router, model, query)
 
 
 def _run_turn(
     session: TurnSession,
-    router: LayaGatewayRouter | LocalLayaRouter | LayaCppRouter | HinglishRetailRouter,
+    router: LayaGatewayRouter | LocalLayaRouter | LayaCppRouter | HinglishRetailRouter | RetailMiniLMRouter,
     model: ChatModel,
     query: str,
 ) -> None:
@@ -63,7 +66,7 @@ def _run_turn(
     print()
     elapsed_ms = (time.perf_counter() - started) * 1000
     print(f"intent: {result['intent']}  topic: {result['topic']}")
-    source = "local Python GPU" if isinstance(router, LocalLayaRouter) else "local laya.cpp" if isinstance(router, LayaCppRouter) else "local retail BERT" if isinstance(router, HinglishRetailRouter) else "gateway"
+    source = "local Python GPU" if isinstance(router, LocalLayaRouter) else "local laya.cpp" if isinstance(router, LayaCppRouter) else "local retail BERT" if isinstance(router, HinglishRetailRouter) else "local retail MiniLM" if isinstance(router, RetailMiniLMRouter) else "gateway"
     print(f"Intent router {source}: {router.last_ms:.0f} ms")
     if isinstance(router, (LayaGatewayRouter, LayaCppRouter)) and router.last_headers_ms is not None:
         print(f"  until response headers: {router.last_headers_ms:.0f} ms")
