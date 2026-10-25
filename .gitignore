@@ -23,6 +23,8 @@ artifacts/
 # Large, generated local training data and downloaded model archives.
 data/external/*-synthetic-*.jsonl
 systemone-*-final*.zip
+systemone-*-final/
+systemone-*-finalretail/
 
 # Optional local PostgreSQL data directory for episodic memory development.
 .postgres-data/
