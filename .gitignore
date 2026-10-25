@@ -19,3 +19,10 @@ local/
 
 # Trained decision-model bundles are generated from versioned datasets.
 artifacts/
+
+# Large, generated local training data and downloaded model archives.
+data/external/*-synthetic-*.jsonl
+systemone-*-final*.zip
+
+# Optional local PostgreSQL data directory for episodic memory development.
+.postgres-data/
