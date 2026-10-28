@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import time
 from collections.abc import AsyncIterator
 
@@ -11,6 +12,7 @@ from gnaniassignment.app.config import load_environment
 from gnaniassignment.app.container import create_session
 from gnaniassignment.stt.gnani import GnaniError, GnaniProcessing, GnaniRealtimeStt, GnaniTranscript, GnaniTurnBridge, PCM_FRAME_BYTES
 from gnaniassignment.pipeline.gnani_tts_speak import speak
+from gnaniassignment.tts.gnani import should_add_clear_throat
 from gnaniassignment.pipeline.voice_metrics import write_voice_metric
 
 
@@ -44,10 +46,11 @@ async def run(
     with_tts: bool = False,
     playback_device: str | None = None,
     suppress_stt_during_tts: bool = True,
+    customer_id: str | None = None,
 ) -> None:
     load_environment()
     stt = GnaniRealtimeStt()
-    bridge = GnaniTurnBridge(create_session()) if with_llm else None
+    bridge = GnaniTurnBridge(create_session(customer_id=customer_id)) if with_llm else None
     input_enabled = asyncio.Event()
     input_enabled.set()
     arecord_command = [
@@ -85,6 +88,8 @@ async def run(
                     final_received_at = time.perf_counter()
                     turn_started = final_received_at
                     transcripts.append(event)
+                    if bridge is not None and hasattr(bridge.session, "record_stt_segment"):
+                        bridge.session.record_stt_segment(event.text, event.segment_id, event.latency_ms)
                     print(f"transcript: {event.text}", flush=True)
                     print(f"metrics | STT final: {_ms(event.latency_ms)} | end-of-turn target: {stt.min_silence_ms} ms", flush=True)
                     stt_metrics: dict[str, float | int | None] = {
@@ -103,6 +108,9 @@ async def run(
                     if bridge is not None and event.text.strip():
                         print("pipeline: routing and generating", flush=True)
                         first_answer_chunk_at: float | None = None
+                        first_answer_chunk = asyncio.Event()
+                        reply_playback_gate = asyncio.Event()
+                        loop = asyncio.get_running_loop()
 
                         def show_answer(chunk: str) -> None:
                             nonlocal first_answer_chunk_at
@@ -116,9 +124,38 @@ async def run(
                                     f"metrics | LLM TTFT: {_ms((first_answer_chunk_at - turn_started) * 1000)}",
                                     flush=True,
                                 )
+                                loop.call_soon_threadsafe(first_answer_chunk.set)
                             print(chunk, end="", flush=True)
 
-                        result = await bridge.handle_async(event, on_chunk=show_answer)
+                        generation = asyncio.create_task(bridge.handle_async(event, on_chunk=show_answer))
+
+                        async def play_latency_giggle() -> bool:
+                            """Fill long pre-token silence without involving the LLM."""
+                            if not with_tts or os.getenv("GNANI_TTS_LATENCY_GIGGLE_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
+                                reply_playback_gate.set()
+                                return False
+                            threshold_ms = float(os.getenv("GNANI_TTS_LATENCY_GIGGLE_MS", "450"))
+                            try:
+                                await asyncio.wait_for(first_answer_chunk.wait(), timeout=threshold_ms / 1000)
+                                reply_playback_gate.set()
+                                return False
+                            except asyncio.TimeoutError:
+                                if generation.done():
+                                    reply_playback_gate.set()
+                                    return False
+                                print("tts: latency giggle", flush=True)
+                                write_voice_metric({"event": "tts_latency_giggle", "threshold_ms": threshold_ms})
+                                if suppress_stt_during_tts:
+                                    input_enabled.clear()
+                                try:
+                                    await speak("<giggle>", playback_device, latency_giggle=True)
+                                finally:
+                                    input_enabled.set()
+                                    reply_playback_gate.set()
+                                return True
+
+                        latency_giggle = asyncio.create_task(play_latency_giggle())
+                        result = await generation
                         if result is not None:
                             print()
                             print(f"intent: {result['intent']}", flush=True)
@@ -132,6 +169,7 @@ async def run(
                             if with_tts and result["spoken"]:
                                 print("tts: speaking", flush=True)
                                 tts_started = time.perf_counter()
+                                llm_ttft_ms = (first_answer_chunk_at - turn_started) * 1000 if first_answer_chunk_at is not None else result.get("metrics", {}).get("llm_ttft_ms")
 
                                 def on_first_audio(metrics: dict[str, float | int | None]) -> None:
                                     live = {"event": "tts_first_audio", **metrics}
@@ -149,7 +187,21 @@ async def run(
                                     input_enabled.clear()
                                     write_voice_metric({"event": "stt_suppressed_during_tts"})
                                 try:
-                                    tts_metrics = await speak(result["spoken"], playback_device, on_first_audio=on_first_audio)
+                                    # The request starts now, even if the latency cue is
+                                    # still audible. `playback_gate` preserves cue → reply
+                                    # ordering while hiding the answer TTS setup time.
+                                    answer_tts = asyncio.create_task(speak(
+                                        result["spoken"], playback_device, on_first_audio=on_first_audio,
+                                        add_clear_throat=(
+                                            os.getenv("GNANI_TTS_POST_RESPONSE_GIGGLE_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+                                            and should_add_clear_throat(
+                                                llm_ttft_ms,
+                                                float(os.getenv("GNANI_TTS_POST_RESPONSE_GIGGLE_MS", "500")),
+                                            )
+                                        ),
+                                        playback_gate=reply_playback_gate,
+                                    ))
+                                    tts_metrics = await answer_tts
                                 finally:
                                     input_enabled.set()
                                 if isinstance(tts_metrics["tts_ttfa_ms"], (int, float)):
@@ -190,6 +242,12 @@ async def run(
             if process.returncode is None:
                 process.terminate()
                 await process.wait()
+            # This is deliberately inside finally: Ctrl+C must still persist
+            # the STT/LLM transcript and run the end-of-call judge.
+            if bridge is not None and hasattr(bridge.session, "finalize_call"):
+                judgment = await asyncio.to_thread(bridge.session.finalize_call)
+                if judgment is not None:
+                    print(f"call_judgment: {'failed' if 'judge_error' in judgment else 'completed'}", flush=True)
     print(f"final_segment_count: {len(transcripts)}")
 
 
@@ -200,6 +258,7 @@ def main() -> None:
     parser.add_argument("--with-llm", action="store_true", help="Route final STT segments through the intent and LLM pipeline")
     parser.add_argument("--with-tts", action="store_true", help="Speak each LLM reply through Gnani Timbre realtime TTS (requires --with-llm)")
     parser.add_argument("--playback-device", help="Optional ALSA playback device for --with-tts")
+    parser.add_argument("--customer-id", help="Authenticated caller/customer ID; loads that account's order window before the call")
     parser.add_argument("--allow-barge-in", action="store_true", help="Keep forwarding microphone audio while TTS plays; disable only when using real echo cancellation or separate call tracks")
     args = parser.parse_args()
     if args.seconds is not None and args.seconds <= 0:
@@ -207,7 +266,7 @@ def main() -> None:
     if args.with_tts and not args.with_llm:
         parser.error("--with-tts requires --with-llm")
     try:
-        asyncio.run(run(args.seconds, args.device, with_llm=args.with_llm, with_tts=args.with_tts, playback_device=args.playback_device, suppress_stt_during_tts=not args.allow_barge_in))
+        asyncio.run(run(args.seconds, args.device, with_llm=args.with_llm, with_tts=args.with_tts, playback_device=args.playback_device, suppress_stt_during_tts=not args.allow_barge_in, customer_id=args.customer_id))
     except KeyboardInterrupt:
         print("call ended")
 

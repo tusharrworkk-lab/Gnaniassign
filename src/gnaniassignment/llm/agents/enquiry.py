@@ -119,7 +119,9 @@ class EnquiryAgent(SubAgent):
 
     def _prompts(self, text: str, memory: str) -> tuple[str, str]:
         retrieved = self.retriever.retrieve(self.name, text, limit=4)
-        knowledge = ("\n\n".join(retrieved) or self.knowledge)[:MAX_KNOWLEDGE_CHARS]
+        knowledge_parts = [self.knowledge, *retrieved]
+        knowledge = "\n\n".join(part for part in knowledge_parts if part and part != "No approved knowledge has been loaded yet.")
+        knowledge = (knowledge or "No approved knowledge has been loaded yet.")[:MAX_KNOWLEDGE_CHARS]
         provided = []
         if "- order_id:" in memory:
             provided.append("order ID")
@@ -128,6 +130,9 @@ class EnquiryAgent(SubAgent):
         slot_rule = ""
         if provided:
             slot_rule = f"\n\nMANDATORY: The following fields are already provided in Working memory: {', '.join(provided)}. Do not ask the customer for any of them again."
+        verified_order = re.search(r"Verified matching account order window.*?order ID ([A-Za-z0-9-]+)", memory, flags=re.IGNORECASE | re.DOTALL)
+        if verified_order:
+            slot_rule += f"\n\nMANDATORY: A verified account record for order ID {verified_order.group(1)} is already selected for this turn. Use its supplied status directly. Do not ask for an order ID."
         user_prompt = f"Approved knowledge:\n{knowledge}\n\nRelevant conversation:\n{memory}\n\nCurrent user query:\n{text}{slot_rule}"
         return self.system_prompt, user_prompt
 

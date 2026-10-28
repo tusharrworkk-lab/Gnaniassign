@@ -48,10 +48,10 @@ class PostgresKnowledgeStore:
             cursor.execute(
                 """
                 SELECT content FROM approved_knowledge_chunks
-                WHERE intent = %s AND status = 'approved'
+                WHERE (%s = '*' OR intent = %s) AND status = 'approved'
                 ORDER BY priority DESC, updated_at DESC, id DESC
                 LIMIT %s
                 """,
-                (self.intent, limit),
+                (self.intent, self.intent, limit),
             )
             return [row[0] for row in cursor.fetchall()]

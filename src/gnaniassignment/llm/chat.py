@@ -22,6 +22,7 @@ DEFAULT_SIMPLISMART_URL = "https://api.simplismart.live"
 DEFAULT_SIMPLISMART_MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 DEFAULT_BEDROCK_REGION = "ap-south-1"
 DEFAULT_BEDROCK_MODEL = "google.gemma-3-4b-it"
+DEFAULT_BEDROCK_GPT_OSS_MODEL = "openai.gpt-oss-120b-1:0"
 
 
 class ChatModel(Protocol):
@@ -408,6 +409,105 @@ class BedrockChatModel:
                     if self.last_first_token_ms is None:
                         self.last_first_token_ms = (time.perf_counter() - started) * 1000
                     yield content
+        finally:
+            self.last_stream_ms = (time.perf_counter() - started) * 1000
+
+
+class BedrockGptOssChatModel:
+    """GPT-OSS-specific Bedrock Converse adapter.
+
+    GPT-OSS emits separate reasoning and final-text content blocks.  Reasoning
+    is deliberately consumed but never surfaced to the caller or TTS.  This
+    adapter is intentionally separate from :class:`BedrockChatModel`, which
+    keeps the existing Gemma request and streaming behaviour unchanged.
+    """
+
+    def __init__(
+        self,
+        model: str | None = None,
+        api_key: str | None = None,
+        client: object | None = None,
+    ) -> None:
+        self.model = model or os.getenv("BEDROCK_GPT_OSS_MODEL") or DEFAULT_BEDROCK_GPT_OSS_MODEL
+        self.region = os.getenv("BEDROCK_REGION") or DEFAULT_BEDROCK_REGION
+        self.auth_mode = os.getenv("BEDROCK_AUTH_MODE", "api_key").lower()
+        self.last_first_token_ms: float | None = None
+        self.last_stream_ms: float | None = None
+        if client is not None:
+            self.client = client
+            return
+
+        try:
+            import boto3
+        except ImportError as error:
+            raise RuntimeError("Install the Bedrock provider with: uv sync --extra bedrock") from error
+
+        if self.auth_mode == "api_key":
+            bearer_token = api_key or os.getenv("BEDROCK_API_KEY")
+            if bearer_token:
+                os.environ["AWS_BEARER_TOKEN_BEDROCK"] = bearer_token
+        elif self.auth_mode == "iam":
+            os.environ.pop("AWS_BEARER_TOKEN_BEDROCK", None)
+        else:
+            raise ValueError("BEDROCK_AUTH_MODE must be 'api_key' or 'iam'.")
+        profile = os.getenv("AWS_PROFILE")
+        session = boto3.Session(profile_name=profile or None, region_name=self.region)
+        self.client = session.client("bedrock-runtime")
+
+    def _request(self, system: str, user: str) -> dict[str, object]:
+        return {
+            "modelId": self.model,
+            "system": [{"text": system}],
+            "messages": [{"role": "user", "content": [{"text": user}]}],
+            "inferenceConfig": {
+                "temperature": float(os.getenv("BEDROCK_GPT_OSS_TEMPERATURE", "0.2")),
+                # Reasoning is included in this completion budget.  32 tokens,
+                # suitable for Gemma, often ends before GPT-OSS emits final text.
+                "maxTokens": int(os.getenv("BEDROCK_GPT_OSS_MAX_OUTPUT_TOKENS", "256")),
+            },
+            "additionalModelRequestFields": {
+                "reasoning_effort": os.getenv("BEDROCK_GPT_OSS_REASONING_EFFORT", "low"),
+            },
+        }
+
+    def complete(self, system: str, user: str) -> str:
+        response = self.client.converse(**self._request(system, user))
+        content = response["output"]["message"]["content"]
+        text = "".join(part.get("text", "") for part in content)
+        if not text.strip():
+            stop_reason = response.get("stopReason", "unknown")
+            raise ValueError(
+                "GPT-OSS returned no final text "
+                f"(stopReason={stop_reason!r}). Increase BEDROCK_GPT_OSS_MAX_OUTPUT_TOKENS if needed."
+            )
+        return text.strip()
+
+    def stream_complete(self, system: str, user: str) -> Iterator[str]:
+        started = time.perf_counter()
+        self.last_first_token_ms = None
+        self.last_stream_ms = None
+        emitted_text = False
+        stop_reason = "unknown"
+        try:
+            response = self.client.converse_stream(**self._request(system, user))
+            for event in response["stream"]:
+                message_stop = event.get("messageStop")
+                if isinstance(message_stop, dict):
+                    stop_reason = str(message_stop.get("stopReason", stop_reason))
+                delta = event.get("contentBlockDelta", {}).get("delta", {})
+                # `reasoningContent` is intentionally ignored. It is internal
+                # deliberation, not user-facing agent speech.
+                content = delta.get("text")
+                if isinstance(content, str) and content:
+                    emitted_text = True
+                    if self.last_first_token_ms is None:
+                        self.last_first_token_ms = (time.perf_counter() - started) * 1000
+                    yield content
+            if not emitted_text:
+                raise ValueError(
+                    "GPT-OSS returned no final text "
+                    f"(stopReason={stop_reason!r}). Increase BEDROCK_GPT_OSS_MAX_OUTPUT_TOKENS if needed."
+                )
         finally:
             self.last_stream_ms = (time.perf_counter() - started) * 1000
 

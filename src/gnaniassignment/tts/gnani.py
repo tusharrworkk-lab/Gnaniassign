@@ -7,6 +7,7 @@ import base64
 import inspect
 import json
 import os
+import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
@@ -14,6 +15,39 @@ from typing import Any
 
 
 GNANI_TTS_ENDPOINT = "wss://api.vachana.ai/api/v1/tts"
+_INLINE_TAG = re.compile(r"<[^>]{1,80}>")
+_POSITIVE_REPLY = re.compile(r"\b(shukriya|dhanyavaad|good news|acchi khabar|khushi|congratulations)\b", re.I)
+
+
+def should_add_clear_throat(ttft_ms: float | int | None, threshold_ms: float = 700) -> bool:
+    """Deterministic latency rule; no LLM or judge participates in this decision."""
+    return isinstance(ttft_ms, (int, float)) and ttft_ms > threshold_ms
+
+
+def decorate_tts_text(text: str, *, enabled: bool, model: str, add_clear_throat: bool = False, latency_giggle: bool = False) -> str:
+    """Add only application-controlled Timbre v3 audio tags to spoken text.
+
+    Stored transcripts stay unmodified. Any markup emitted by an LLM is removed
+    so that only this allowlisted formatter controls voice delivery.
+    """
+    clean = _INLINE_TAG.sub("", text).strip()
+    if not enabled or model != "timbre-v3.0":
+        return clean
+    # This cue is sent before any LLM text exists. The normal reply is
+    # synthesized separately once generation completes.
+    if latency_giggle:
+        return "<giggle>"
+    if not clean:
+        return clean
+    tags: list[str] = []
+    # Use a light giggle as the latency cue after a measured slow LLM
+    # first-token response. It is application-controlled, never LLM markup.
+    if add_clear_throat:
+        tags.append("<giggle>")
+    # Keep the expressive catalog intentionally narrow for retail support.
+    if _POSITIVE_REPLY.search(clean) and "<giggle>" not in tags:
+        tags.append("<giggle>")
+    return " ".join([*tags, clean])
 
 
 @dataclass(frozen=True)
@@ -56,6 +90,7 @@ class GnaniRealtimeTts:
         self.model = model or os.getenv("GNANI_TTS_MODEL", "timbre-v3.0")
         self.language = language or os.getenv("GNANI_TTS_LANGUAGE", "hi-en")
         self.speed = speed if speed is not None else float(os.getenv("GNANI_TTS_SPEED", "1.0"))
+        self.audio_tags = os.getenv("GNANI_TTS_AUDIO_TAGS", "false").lower() in {"1", "true", "yes", "on"}
         self.sample_rate = sample_rate or int(os.getenv("GNANI_TTS_SAMPLE_RATE", "24000"))
         if self.model not in {"timbre-v2.5", "timbre-v3.0"}:
             raise ValueError("GNANI_TTS_MODEL must be 'timbre-v2.5' or 'timbre-v3.0'")
@@ -77,11 +112,14 @@ class GnaniRealtimeTts:
     def headers(self) -> dict[str, str]:
         return {"X-API-Key-ID": self.api_key, "Content-Type": "application/json"}
 
-    def request(self, text: str) -> dict[str, Any]:
+    def request(self, text: str, *, add_clear_throat: bool = False, latency_giggle: bool = False) -> dict[str, Any]:
         if not text.strip():
             raise ValueError("TTS text must not be empty")
+        rendered = decorate_tts_text(text, enabled=self.audio_tags, model=self.model, add_clear_throat=add_clear_throat, latency_giggle=latency_giggle)
+        if not rendered:
+            raise ValueError("TTS latency cue requires GNANI_TTS_AUDIO_TAGS=true and timbre-v3.0")
         return {
-            "text": text.strip(),
+            "text": rendered,
             "voice": self.voice,
             "model": self.model,
             "language": self.language,
@@ -112,7 +150,7 @@ class GnaniRealtimeTts:
             await self._stream.close()
         self._stream = None
 
-    async def synthesize(self, text: str) -> AsyncIterator[GnaniAudioChunk]:
+    async def synthesize(self, text: str, *, add_clear_throat: bool = False, latency_giggle: bool = False) -> AsyncIterator[GnaniAudioChunk]:
         """Send one text request and yield decoded audio in provider order."""
         if self._stream is None:
             raise RuntimeError("Enter GnaniRealtimeTts with 'async with' before synthesis")
@@ -123,7 +161,7 @@ class GnaniRealtimeTts:
             self.last_audio_chunks = 0
             self.last_audio_bytes = 0
             try:
-                await self._stream.send(json.dumps(self.request(text)))
+                await self._stream.send(json.dumps(self.request(text, add_clear_throat=add_clear_throat, latency_giggle=latency_giggle)))
                 while True:
                     raw_message = await self._stream.recv()
                     if isinstance(raw_message, bytes):

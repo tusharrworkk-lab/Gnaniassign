@@ -1,0 +1,14 @@
+-- Fictional Nukkad Fresh operating policy for local voice-agent testing.
+DELETE FROM approved_knowledge_chunks WHERE title LIKE 'GROCERY-%';
+
+INSERT INTO approved_knowledge_chunks (intent, title, content, priority) VALUES
+('generic', 'GROCERY-general-playbook', 'Nukkad Fresh is a neighborhood grocery-delivery service. Use only the verified account order records supplied in the conversation. For order tracking, state the stored delivery note exactly and never promise a new time. Packed orders may be reviewed for cancellation or address correction; out-for-delivery orders cannot be rerouted or cancelled by the voice agent. For damaged, missing, wrong, or quantity issues, collect the order ID and the affected grocery item if absent, then say verification is required. For a payment pending/debited order, do not claim payment success or failure beyond the verified record. For refunds, state the verified refund status and never promise a bank-credit date. Keep replies concise, warm, and Hinglish.', 200),
+('track_order', 'GROCERY-track-order', 'For grocery tracking, use the verified order delivery note. Ask for an order ID only if it is absent. Do not invent rider location or delivery timing.', 100),
+('return_item', 'GROCERY-return-item', 'For fresh or grocery return requests, collect the order ID and affected item if absent. Explain that item condition requires verification; do not promise pickup, replacement, or refund.', 100),
+('cancel_order', 'GROCERY-cancel-order', 'Packed orders can be reviewed for cancellation. Out-for-delivery or delivered orders cannot be cancelled by the voice agent. Never promise a cancellation before verification.', 100),
+('refund_status', 'GROCERY-refund-status', 'Use the verified refund status for the named order. Refund requests and approved refunds can still require bank processing; never promise a credit date.', 100),
+('wrong_item', 'GROCERY-wrong-item', 'For wrong or missing grocery items, collect the order ID and the expected versus received item if absent. Do not promise replacement or credit before verification.', 100),
+('size_issue', 'GROCERY-quantity-pack-size', 'For grocery quantity, weight, pack-size, or freshness issues, collect the order ID and affected item if absent. Treat it as a verification request, not an automatic refund.', 100),
+('payment_issue', 'GROCERY-payment', 'For debited or pending grocery payments, state only the verified payment record. Do not claim payment success, order creation, reversal, or refund without verification.', 100),
+('delivery_address', 'GROCERY-address', 'Address changes can be reviewed only while an order is packed and not assigned to a rider. Do not ask for a full address in voice chat.', 100),
+('other', 'GROCERY-other', 'For unrelated requests, explain briefly that Nukkad Fresh support can help with grocery orders, delivery, payment, refunds, and item issues.', 100);

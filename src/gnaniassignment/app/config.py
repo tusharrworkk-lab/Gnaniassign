@@ -23,6 +23,10 @@ class Settings:
     def from_environment(cls) -> "Settings":
         load_environment()
         intent_provider = os.getenv("INTENT_PROVIDER", "laya").lower()
+        # Turning off MiniLM bypasses *all* intent classification. Every turn
+        # then goes directly to one general retail-support agent.
+        if intent_provider == "retail_minilm" and os.getenv("RETAIL_MINILM_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
+            intent_provider = "generic"
         threshold_default = "0.12" if intent_provider == "hinglish_retail" else "0.60" if intent_provider == "retail_minilm" else "0.5"
         return cls(
             intent_provider=intent_provider,

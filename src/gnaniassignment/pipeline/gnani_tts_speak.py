@@ -16,8 +16,16 @@ async def speak(
     text: str,
     device: str | None = None,
     on_first_audio: Callable[[dict[str, float | int | None]], None] | None = None,
+    add_clear_throat: bool = False,
+    latency_giggle: bool = False,
+    playback_gate: asyncio.Event | None = None,
 ) -> dict[str, float | int | None]:
-    """Stream Gnani raw PCM into ALSA ``aplay`` as it arrives."""
+    """Stream Gnani raw PCM into ALSA ``aplay`` as it arrives.
+
+    ``playback_gate`` lets synthesis run while another short cue is audible.
+    PCM is buffered only until the gate opens, so the reply can start directly
+    after that cue without paying a second TTS first-audio delay.
+    """
     load_environment()
     async with GnaniRealtimeTts() as tts:
         started = time.perf_counter()
@@ -30,8 +38,11 @@ async def speak(
         if player.stdin is None:
             raise RuntimeError("Could not open ALSA playback input")
         try:
-            async for chunk in tts.synthesize(text):
-                player.stdin.write(chunk.audio)
+            buffered_audio: list[bytes] = []
+
+            async def write_audio(audio: bytes) -> None:
+                nonlocal first_playback_ms
+                player.stdin.write(audio)
                 await player.stdin.drain()
                 if first_playback_ms is None:
                     first_playback_ms = (time.perf_counter() - started) * 1000
@@ -40,6 +51,21 @@ async def speak(
                             "tts_ttfa_ms": tts.last_first_audio_ms,
                             "playback_first_write_ms": first_playback_ms,
                         })
+
+            async for chunk in tts.synthesize(text, add_clear_throat=add_clear_throat, latency_giggle=latency_giggle):
+                if playback_gate is not None and not playback_gate.is_set():
+                    buffered_audio.append(chunk.audio)
+                    continue
+                if buffered_audio:
+                    for audio in buffered_audio:
+                        await write_audio(audio)
+                    buffered_audio.clear()
+                await write_audio(chunk.audio)
+            if buffered_audio:
+                if playback_gate is not None:
+                    await playback_gate.wait()
+                for audio in buffered_audio:
+                    await write_audio(audio)
         finally:
             player.stdin.close()
             await player.stdin.wait_closed()

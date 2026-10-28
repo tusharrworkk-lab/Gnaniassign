@@ -10,7 +10,7 @@ def update_working_memory(current: dict[str, str], text: str, intent: str, topic
     memory["active_intent"] = intent
     memory["active_topic"] = topic
     for name, pattern in {
-        "order_id": r"<(?:ORDER_ID|ORDER)>|(?:order\s*(?:id|number)\s*[:#-]?\s*)([A-Za-z0-9-]{4,})",
+        "order_id": r"<(?:ORDER_ID|ORDER)>|\b(?:GRC|ORD)-[A-Za-z0-9-]{3,}\b|(?:order\s*(?:id|number)\s*[:#-]?\s*)([A-Za-z0-9-]{4,})",
         "payment_reference": r"<(?:PAYMENT_REF|PAYMENT_REFERENCE)>|(?:reference\s*(?:id|number)?\s*[:#-]?\s*)([A-Za-z0-9-]{4,})",
     }.items():
         match = re.search(pattern, text, flags=re.IGNORECASE)

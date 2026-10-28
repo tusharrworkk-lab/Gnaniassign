@@ -9,7 +9,7 @@ import unittest
 from types import SimpleNamespace
 
 from gnaniassignment.llm.agents.enquiry import enquiry_agents
-from gnaniassignment.llm.chat import BedrockChatModel, CerebrasChatModel, DEFAULT_BEDROCK_MODEL, DEFAULT_CEREBRAS_MODEL, DEFAULT_GROQ_MODEL, DEFAULT_SIMPLISMART_MODEL, DEFAULT_SUBAGENT_MODEL, GroqChatModel, SimplismartChatModel, VercelGatewayChatModel
+from gnaniassignment.llm.chat import BedrockChatModel, BedrockGptOssChatModel, CerebrasChatModel, DEFAULT_BEDROCK_MODEL, DEFAULT_BEDROCK_GPT_OSS_MODEL, DEFAULT_CEREBRAS_MODEL, DEFAULT_GROQ_MODEL, DEFAULT_SIMPLISMART_MODEL, DEFAULT_SUBAGENT_MODEL, GroqChatModel, SimplismartChatModel, VercelGatewayChatModel
 from gnaniassignment.llm.memory import ChatTurn, render_memory, select_memory, topic_from_query
 from gnaniassignment.llm.local_laya import LocalLayaRouter, require_requested_cuda
 from gnaniassignment.llm.laya_cpp import DEFAULT_LAYA_CPP_MODEL, DEFAULT_LAYA_CPP_URL, LayaCppRouter
@@ -18,13 +18,18 @@ from gnaniassignment.llm.agents.retail import retail_clarification_agent
 from gnaniassignment.llm.prompts.intents import QUESTIONS
 from gnaniassignment.llm.retrieval import IntentScopedRetriever
 from gnaniassignment.llm.router import LAYA_GATEWAY_URL, LAYA_MODEL, LayaGatewayRouter
+from gnaniassignment.app.config import Settings
+from gnaniassignment.llm.agents.generic import generic_agents
+from gnaniassignment.llm.agents.generic import GENERIC_PROMPT
+from gnaniassignment.llm.generic_router import GenericRouter
+from gnaniassignment.conversation_analytics import BedrockConversationJudge, flow_flags
 from gnaniassignment.orchestration.graph import build_graph, select_intent
 from gnaniassignment.orchestration.session import TurnSession
 from gnaniassignment.pipeline.provider_benchmark import provider_from_event
 from gnaniassignment.pipeline.gnani_microphone import pcm_frames
 from gnaniassignment.pipeline.laya_benchmark import _same_execution_device
 from gnaniassignment.stt.gnani import GnaniProcessing, GnaniRealtimeStt, GnaniTranscript, GnaniTurnBridge, PCM_FRAME_BYTES
-from gnaniassignment.tts.gnani import GnaniRealtimeTts
+from gnaniassignment.tts.gnani import GnaniRealtimeTts, decorate_tts_text, should_add_clear_throat
 
 
 class Router:
@@ -60,6 +65,125 @@ class Store:
 
 
 class PipelineTests(unittest.TestCase):
+    def test_retail_minilm_switch_uses_configured_fallback(self):
+        from unittest.mock import patch
+
+        with patch.dict("os.environ", {
+            "INTENT_PROVIDER": "retail_minilm",
+            "RETAIL_MINILM_ENABLED": "false",
+        }, clear=True):
+            self.assertEqual(Settings.from_environment().intent_provider, "generic")
+
+    def test_generic_mode_sends_every_query_to_general_agent(self):
+        chat = Chat()
+        result = TurnSession(build_graph(GenericRouter(), generic_agents(chat))).ask("Mera order late hai")
+        self.assertEqual(result["intent"], "generic")
+        self.assertEqual(len(chat.prompts), 1)
+
+    def test_support_prompt_does_not_seed_unsupported_checking_language(self):
+        self.assertNotIn("Main check karke batati hoon", GENERIC_PROMPT)
+        self.assertNotIn("Aap order ID bata dijiye", GENERIC_PROMPT)
+        self.assertIn("You have no live order-operation tool", GENERIC_PROMPT)
+
+    def test_session_records_a_complete_conversation_turn_for_review(self):
+        class ConversationStore:
+            def __init__(self):
+                self.records = []
+
+            def append(self, record):
+                self.records.append(record)
+
+            def attach_followup(self, session_id, next_user_text):
+                return []
+
+        store = ConversationStore()
+        session = TurnSession(build_graph(GenericRouter(), generic_agents(Chat())), customer_id="customer-1", conversation_store=store)
+        session.ask("Mera order late hai, order ID ORD-1042 hai")
+        self.assertEqual(len(store.records), 1)
+        self.assertEqual(store.records[0].user_text, "Mera order late hai, order ID ORD-1042 hai")
+        self.assertEqual(store.records[0].routed_intent, "generic")
+
+    def test_flow_flags_find_repeated_field_requests_and_english(self):
+        flags = flow_flags("Please share your order ID so I can help.", {"order_id": "ORD-1042"})
+        self.assertIn("repeated_known_field_request", flags)
+        self.assertIn("english_only_response", flags)
+
+    def test_call_finalization_keeps_stt_turns_and_judgment_together(self):
+        class CallStore:
+            def __init__(self):
+                self.records = []
+                self.finalized = None
+
+            def append(self, record):
+                self.records.append(record)
+
+            def attach_followup(self, session_id, next_user_text):
+                return []
+
+            def finalize_call(self, *args):
+                self.finalized = args
+
+        class Judge:
+            def judge(self, stt_segments, transcript):
+                return {"stt_intent_judgment": {"segments": [{"intent": "track_order"}]}, "conversation_patterns": {"dos": [], "donts": []}}
+
+        store = CallStore()
+        session = TurnSession(build_graph(GenericRouter(), generic_agents(Chat())), conversation_store=store, call_judge=Judge())
+        session.record_stt_segment("Mera order kahan hai", "segment-1", 120)
+        session.ask("Mera order kahan hai")
+        judgment = session.finalize_call()
+        self.assertEqual(judgment["stt_intent_judgment"]["segments"][0]["intent"], "track_order")
+        self.assertEqual(store.finalized[2][0]["text"], "Mera order kahan hai")
+        self.assertEqual(store.finalized[3][0]["user"], "Mera order kahan hai")
+
+    def test_session_preloads_and_refreshes_customer_order_window(self):
+        calls = []
+
+        def order_window(query, working_memory):
+            calls.append((query, dict(working_memory)))
+            return f"Verified account order window: {query or 'initial'}"
+
+        chat = Chat()
+        session = TurnSession(build_graph(GenericRouter(), generic_agents(chat)), account_context_provider=order_window)
+        self.assertEqual(calls[0][0], "")
+        session.ask("GRC-10003 ka refund kahan hai?")
+        self.assertEqual(calls[-1][0], "GRC-10003 ka refund kahan hai?")
+        self.assertIn("Verified account order window", chat.prompts[0])
+
+    def test_verified_matching_order_is_explicitly_marked_as_already_provided(self):
+        chat = Chat()
+        agent = generic_agents(chat)["generic"]
+        agent.reply(
+            "GRC-10003 ka refund kahan hai?", {},
+            "Verified matching account order window (use only these records as facts):\norder ID GRC-10003; refund status verification pending.",
+        )
+        self.assertIn("Do not ask for an order ID", chat.prompts[0])
+
+    def test_bedrock_intent_judge_receives_only_stt_segments(self):
+        class Client:
+            def __init__(self):
+                self.requests = []
+
+            def converse(self, **request):
+                self.requests.append(request)
+                return {"output": {"message": {"content": [{"text": '{"segments": []}'}]}}}
+
+        client = Client()
+        judge = BedrockConversationJudge.__new__(BedrockConversationJudge)
+        judge.client, judge.model, judge.max_tokens = client, "test-model", 100
+        judge.judge([{"text": "Mera order kahan hai", "segment_id": "s1"}], [{"user": "Mera order kahan hai", "assistant": "Your order is shipped"}])
+        first_payload = client.requests[0]["messages"][0]["content"][0]["text"]
+        second_payload = client.requests[1]["messages"][0]["content"][0]["text"]
+        self.assertIn("Mera order kahan hai", first_payload)
+        self.assertNotIn("Your order is shipped", first_payload)
+        self.assertIn("Your order is shipped", second_payload)
+
+    def test_retail_minilm_switch_is_enabled_by_default(self):
+        from unittest.mock import patch
+
+        with patch.dict("os.environ", {"INTENT_PROVIDER": "retail_minilm", "RETAIL_MINILM_ENABLED": "true"}, clear=True):
+            self.assertEqual(Settings.from_environment().intent_provider, "retail_minilm")
+
     def test_gnani_final_transcript_auto_dispatches_once_by_default(self):
         class Session:
             def __init__(self):
@@ -150,6 +274,31 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(request["voice"], "Shivani")
         self.assertEqual(request["language"], "hi-en")
         self.assertEqual(request["audio_config"]["container"], "raw")
+
+    def test_tts_audio_tags_are_allowlisted_and_v3_only(self):
+        spoken = decorate_tts_text("Aapka order ID ORD-1042 hai. <shouting> Dhanyavaad.", enabled=True, model="timbre-v3.0", add_clear_throat=True)
+        self.assertIn("<giggle>", spoken)
+        self.assertNotIn("<clears throat>", spoken)
+        self.assertIn("<giggle>", spoken)
+        self.assertNotIn("<shouting>", spoken)
+        self.assertNotIn("<pauses>", spoken)
+        self.assertNotIn("<slow>", spoken)
+        self.assertEqual(decorate_tts_text("Hello <giggle>", enabled=True, model="timbre-v2.5"), "Hello")
+
+    def test_clear_throat_is_a_deterministic_ttft_threshold(self):
+        self.assertFalse(should_add_clear_throat(700))
+        self.assertTrue(should_add_clear_throat(701))
+        self.assertFalse(should_add_clear_throat(None))
+
+    def test_latency_giggle_renders_a_tag_only_tts_request(self):
+        self.assertEqual(
+            decorate_tts_text("<giggle>", enabled=True, model="timbre-v3.0", latency_giggle=True),
+            "<giggle>",
+        )
+        self.assertEqual(
+            decorate_tts_text("<giggle>", enabled=False, model="timbre-v3.0", latency_giggle=True),
+            "",
+        )
 
     def test_gnani_16khz_raw_websocket_headers_and_events(self):
         captured: dict[str, object] = {}
@@ -289,6 +438,19 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual([turn.query for turn in selected], ["Where?", "Regions?", "Price?", "How?"])
         self.assertEqual(render_memory(selected).count("Memory:"), 4)
         self.assertEqual(topic_from_query("Somewhere else?"), "general")
+
+    def test_generic_memory_excludes_unrelated_small_talk(self):
+        history = [
+            ChatTurn("GRC-10003 ka refund kahan hai", "Pending", "Refund pending", "generic", "general"),
+            ChatTurn("car", "Order ID?", "Asked for order ID", "generic", "general"),
+            ChatTurn("kya haal aapke", "Order ID?", "Asked for order ID", "generic", "general"),
+        ]
+        selected = select_memory(history, "generic", "general", "GRC-10003 ka refund kahan hai")
+        self.assertEqual([turn.query for turn in selected], ["GRC-10003 ka refund kahan hai"])
+
+    def test_generic_prompt_prevents_repeated_greetings_on_continuing_calls(self):
+        self.assertIn("Greet at most once per call", GENERIC_PROMPT)
+        self.assertIn("continuing call", GENERIC_PROMPT)
 
     def test_session_restores_and_persists_episodic_memory(self):
         class MemoryStore:
@@ -514,6 +676,23 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(list(model.stream_complete("System", "User")), ["नमस्ते"])
         self.assertEqual(resource.request["modelId"], "google.gemma-3-4b-it")
         self.assertEqual(resource.request["inferenceConfig"]["maxTokens"], 32)
+
+    def test_bedrock_gpt_oss_stream_uses_dedicated_reasoning_configuration(self):
+        class BedrockResource:
+            def converse_stream(self, **kwargs):
+                self.request = kwargs
+                return {"stream": iter([
+                    {"contentBlockDelta": {"delta": {"reasoningContent": {"text": "internal"}}}},
+                    {"contentBlockDelta": {"delta": {"text": "Final answer"}}},
+                    {"messageStop": {"stopReason": "end_turn"}},
+                ])}
+
+        resource = BedrockResource()
+        model = BedrockGptOssChatModel(model=DEFAULT_BEDROCK_GPT_OSS_MODEL, client=resource)
+        self.assertEqual(list(model.stream_complete("System", "User")), ["Final answer"])
+        self.assertEqual(resource.request["modelId"], "openai.gpt-oss-120b-1:0")
+        self.assertEqual(resource.request["inferenceConfig"]["maxTokens"], 256)
+        self.assertEqual(resource.request["additionalModelRequestFields"]["reasoning_effort"], "low")
 
     def test_session_streams_decoded_answer_and_stores_summary(self):
         class StreamingChat:

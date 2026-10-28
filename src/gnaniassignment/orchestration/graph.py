@@ -19,12 +19,14 @@ THRESHOLD = 0.5
 
 
 class TurnState(TypedDict):
+    session_id: str
     text: str
     answers: dict[str, Any]
     intent: str
     topic: str
     history: list[ChatTurn]
     working_memory: dict[str, str]
+    account_context: str
     memory: str
     replies: list[dict[str, str]]
     spoken: str | None
@@ -64,6 +66,7 @@ def build_graph(
         decision_context = {
             "recent_conversation": [turn.summary[:320] for turn in state["history"][-2:]],
             "current_query": state["text"],
+            "conversation_session_id": state["session_id"],
         }
         answers = router.predict(decision_context, QUESTIONS)["answers"]
         intent = select_intent(answers, threshold, tuple(agents))
@@ -71,12 +74,17 @@ def build_graph(
         if topic == "general" and state["history"] and state["history"][-1].intent == intent:
             topic = state["history"][-1].topic
         working_memory = update_working_memory(state["working_memory"], state["text"], intent, topic)
+        call_status = (
+            "Call status: This is a continuing call; the caller has already received the greeting."
+            if state["history"]
+            else "Call status: This is the first response of the call."
+        )
         return {
             "answers": answers,
             "intent": intent,
             "topic": topic,
             "working_memory": working_memory,
-            "memory": render_working_memory(working_memory) + "\n\n" + render_memory(select_memory(state["history"], intent, topic)),
+            "memory": render_working_memory(working_memory) + "\n\n" + state["account_context"] + "\n\n" + call_status + "\n\n" + render_memory(select_memory(state["history"], intent, topic, state["text"])),
             "metrics": {"intent_ms": (time.perf_counter() - started) * 1000},
         }
 

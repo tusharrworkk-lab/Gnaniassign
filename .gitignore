@@ -22,6 +22,8 @@ artifacts/
 
 # Large, generated local training data and downloaded model archives.
 data/external/*-synthetic-*.jsonl
+data/external/*-reviewed-*.jsonl
+data/external/*-conversations-*.jsonl
 systemone-*-final*.zip
 systemone-*-final/
 systemone-*-finalretail/
