@@ -40,10 +40,10 @@ def decorate_tts_text(text: str, *, enabled: bool, model: str, add_clear_throat:
     if not clean:
         return clean
     tags: list[str] = []
-    # Use a light giggle as the latency cue after a measured slow LLM
-    # first-token response. It is application-controlled, never LLM markup.
+    # The post-response latency cue is application-controlled, never LLM
+    # markup. It remains separate from the proactive pre-token giggle cue.
     if add_clear_throat:
-        tags.append("<giggle>")
+        tags.append("<clears throat>")
     # Keep the expressive catalog intentionally narrow for retail support.
     if _POSITIVE_REPLY.search(clean) and "<giggle>" not in tags:
         tags.append("<giggle>")

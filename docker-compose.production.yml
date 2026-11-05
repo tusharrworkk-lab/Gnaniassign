@@ -1,0 +1,11 @@
+name: gnani-production
+
+# Production overlay for the single GCP VM. The base compose file owns the
+# persistent PostgreSQL/Redis volumes and networking; this file replaces only
+# the API image and locks the environment to production.
+services:
+  api:
+    image: ${AGENT_IMAGE:?Set AGENT_IMAGE to the Artifact Registry image URI}
+    pull_policy: always
+    environment:
+      AGENT_ENVIRONMENT: production

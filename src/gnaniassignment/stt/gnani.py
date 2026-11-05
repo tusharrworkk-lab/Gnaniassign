@@ -7,9 +7,11 @@ import asyncio
 import inspect
 import json
 import time
-from dataclasses import dataclass
 from collections.abc import AsyncIterable, Awaitable
-from typing import Any, AsyncIterator, Callable, Protocol
+from typing import Any, AsyncIterator, Callable
+
+from gnaniassignment.voice.events import VoiceError, VoiceEvent, VoiceProcessing, VoiceTranscript
+from gnaniassignment.voice.turn_bridge import TurnBridge
 
 
 GNANI_STT_ENDPOINT = "wss://api.vachana.ai/stt/v3/stream"
@@ -17,81 +19,14 @@ PCM_FRAME_BYTES = 1024
 PCM_SAMPLES_PER_FRAME = 512
 
 
-@dataclass(frozen=True)
-class GnaniProcessing:
-    """Gnani VAD has closed a speech segment and transcription has begun."""
-
-    timestamp: str | None = None
-
-
-@dataclass(frozen=True)
-class GnaniTranscript:
-    """An immutable, final transcript produced for one Gnani speech segment."""
-
-    text: str
-    segment_id: str | None = None
-    segment_index: int | None = None
-    audio_duration_ms: int | None = None
-    latency_ms: int | None = None
-
-
-@dataclass(frozen=True)
-class GnaniError:
-    message: str
-    timestamp: str | None = None
-
-
-GnaniEvent = GnaniProcessing | GnaniTranscript | GnaniError
-
-
-class _TurnSink(Protocol):
-    def feed_final(self, phrase: str) -> dict[str, Any]: ...
-
-    def feed_end(self, on_chunk: Callable[[str], None] | None = None) -> dict[str, Any]: ...
-
-
-class GnaniTurnBridge:
-    """Append deduplicated final STT segments to a ``TurnSession``.
-
-    For a voice assistant, Gnani's final transcript is normally the fastest
-    usable turn boundary, so ``auto_end_turn`` defaults to ``True``.  A caller
-    can opt out to join several final segments into one request.
-    """
-
-    def __init__(self, session: _TurnSink, auto_end_turn: bool = True) -> None:
-        self.session = session
-        self.auto_end_turn = auto_end_turn
-        self._seen_segment_ids: set[str] = set()
-
-    def handle(
-        self, event: GnaniEvent, on_chunk: Callable[[str], None] | None = None
-    ) -> dict[str, Any] | None:
-        if not isinstance(event, GnaniTranscript):
-            return None
-        # VAD can occasionally close on initial room noise. A final event
-        # without words must never create an empty intent/LLM request.
-        if not event.text.strip():
-            return None
-        if event.segment_id and event.segment_id in self._seen_segment_ids:
-            return None
-        if event.segment_id:
-            self._seen_segment_ids.add(event.segment_id)
-        pending = self.session.feed_final(event.text)
-        return self.end_turn(on_chunk=on_chunk) if self.auto_end_turn else pending
-
-    async def handle_async(
-        self, event: GnaniEvent, on_chunk: Callable[[str], None] | None = None
-    ) -> dict[str, Any] | None:
-        """Handle a final event off the WebSocket event loop.
-
-        The current LangGraph execution is synchronous.  Running it in a
-        worker preserves receipt of subsequent STT events and audio I/O while
-        the LLM request is in flight.
-        """
-        return await asyncio.to_thread(self.handle, event, on_chunk)
-
-    def end_turn(self, on_chunk: Callable[[str], None] | None = None) -> dict[str, Any]:
-        return self.session.feed_end(on_chunk=on_chunk)
+# Compatibility names retained for callers of the original Gnani module. The
+# events and bridge themselves are provider-neutral and can be emitted by any
+# STT adapter.
+GnaniProcessing = VoiceProcessing
+GnaniTranscript = VoiceTranscript
+GnaniError = VoiceError
+GnaniEvent = VoiceEvent
+GnaniTurnBridge = TurnBridge
 
 
 class GnaniRealtimeStt:
@@ -102,6 +37,8 @@ class GnaniRealtimeStt:
     little-endian PCM frames and preserve the frame cadence for their sample
     rate.
     """
+
+    frame_bytes = PCM_FRAME_BYTES
 
     def __init__(
         self,

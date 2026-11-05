@@ -10,10 +10,12 @@ from collections.abc import AsyncIterator
 
 from gnaniassignment.app.config import load_environment
 from gnaniassignment.app.container import create_session
-from gnaniassignment.stt.gnani import GnaniError, GnaniProcessing, GnaniRealtimeStt, GnaniTranscript, GnaniTurnBridge, PCM_FRAME_BYTES
 from gnaniassignment.pipeline.gnani_tts_speak import speak
 from gnaniassignment.tts.gnani import should_add_clear_throat
 from gnaniassignment.pipeline.voice_metrics import write_voice_metric
+from gnaniassignment.voice.events import VoiceError, VoiceProcessing, VoiceTranscript
+from gnaniassignment.voice.providers import create_stt_provider
+from gnaniassignment.voice.turn_bridge import TurnBridge
 
 
 def _ms(value: object) -> str:
@@ -21,8 +23,8 @@ def _ms(value: object) -> str:
     return f"{float(value):.0f} ms" if isinstance(value, (int, float)) else "n/a"
 
 
-async def pcm_frames(reader: asyncio.StreamReader, input_enabled: asyncio.Event | None = None) -> AsyncIterator[bytes]:
-    """Coalesce arbitrary ALSA pipe reads into Gnani's fixed 1,024-byte frames."""
+async def pcm_frames(reader: asyncio.StreamReader, frame_bytes: int = 1024, input_enabled: asyncio.Event | None = None) -> AsyncIterator[bytes]:
+    """Coalesce ALSA PCM reads into the selected STT adapter's frame size."""
     buffered = bytearray()
     while chunk := await reader.read(4096):
         # Desktop echo suppression: keep draining ALSA while TTS is speaking,
@@ -31,12 +33,12 @@ async def pcm_frames(reader: asyncio.StreamReader, input_enabled: asyncio.Event 
             buffered.clear()
             continue
         buffered.extend(chunk)
-        while len(buffered) >= PCM_FRAME_BYTES:
+        while len(buffered) >= frame_bytes:
             if input_enabled is not None and not input_enabled.is_set():
                 buffered.clear()
                 break
-            yield bytes(buffered[:PCM_FRAME_BYTES])
-            del buffered[:PCM_FRAME_BYTES]
+            yield bytes(buffered[:frame_bytes])
+            del buffered[:frame_bytes]
 
 
 async def run(
@@ -49,8 +51,8 @@ async def run(
     customer_id: str | None = None,
 ) -> None:
     load_environment()
-    stt = GnaniRealtimeStt()
-    bridge = GnaniTurnBridge(create_session(customer_id=customer_id)) if with_llm else None
+    stt = create_stt_provider()
+    bridge = TurnBridge(create_session(customer_id=customer_id)) if with_llm else None
     input_enabled = asyncio.Event()
     input_enabled.set()
     arecord_command = [
@@ -73,18 +75,18 @@ async def run(
     if process.stdout is None:
         raise RuntimeError("Could not read microphone PCM output")
 
-    transcripts: list[GnaniTranscript] = []
+    transcripts: list[VoiceTranscript] = []
     async with stt:
         processing_received_at: float | None = None
 
         async def receive() -> None:
             nonlocal processing_received_at
             async for event in stt.events():
-                if isinstance(event, GnaniProcessing):
+                if isinstance(event, VoiceProcessing):
                     processing_received_at = time.perf_counter()
                     print("stt: processing", flush=True)
                     write_voice_metric({"event": "stt_processing"})
-                elif isinstance(event, GnaniTranscript):
+                elif isinstance(event, VoiceTranscript):
                     final_received_at = time.perf_counter()
                     turn_started = final_received_at
                     transcripts.append(event)
@@ -193,10 +195,10 @@ async def run(
                                     answer_tts = asyncio.create_task(speak(
                                         result["spoken"], playback_device, on_first_audio=on_first_audio,
                                         add_clear_throat=(
-                                            os.getenv("GNANI_TTS_POST_RESPONSE_GIGGLE_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+                                            os.getenv("GNANI_TTS_POST_RESPONSE_CLEAR_THROAT_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
                                             and should_add_clear_throat(
                                                 llm_ttft_ms,
-                                                float(os.getenv("GNANI_TTS_POST_RESPONSE_GIGGLE_MS", "500")),
+                                                float(os.getenv("GNANI_TTS_POST_RESPONSE_CLEAR_THROAT_MS", "500")),
                                             )
                                         ),
                                         playback_gate=reply_playback_gate,
@@ -222,12 +224,12 @@ async def run(
                                 flush=True,
                             )
                             print(f"metrics_log: {path}", flush=True)
-                elif isinstance(event, GnaniError):
+                elif isinstance(event, VoiceError):
                     print(f"stt_error: {event.message}", flush=True)
 
         receiver = asyncio.create_task(receive())
         try:
-            await stt.send_frames(pcm_frames(process.stdout, input_enabled), realtime_pace=False)
+            await stt.send_frames(pcm_frames(process.stdout, stt.frame_bytes, input_enabled), realtime_pace=False)
             await process.wait()
             if process.returncode:
                 raise RuntimeError(f"arecord exited with status {process.returncode}")

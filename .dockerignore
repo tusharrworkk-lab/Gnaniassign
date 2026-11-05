@@ -1,4 +1,4 @@
-# Exclude repository/runtime files that are unrelated to the Lambda image.
+# Exclude repository/runtime files that are unrelated to application images.
 .git
 .venv
 .agents
@@ -8,12 +8,7 @@ artifacts
 brain_notes
 configs
 data
-pipeline
-src
 tests
-README.md
-pyproject.toml
-uv.lock
 
 # Keep laya.cpp source, but omit development/runtime artefacts and the unused
 # English checkpoint. The only model shipped is models/laya/multilingual.

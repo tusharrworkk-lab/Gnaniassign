@@ -19,9 +19,11 @@ class GenericRouter:
         self,
         shadow_router: IntentRouter | None = None,
         on_shadow_prediction: Callable[[str, dict[str, Any], str | None], None] | None = None,
+        on_shadow_error: Callable[[Exception], None] | None = None,
     ) -> None:
         self.shadow_router = shadow_router
         self.on_shadow_prediction = on_shadow_prediction
+        self.on_shadow_error = on_shadow_error
         self.last_ms = 0.0
         self.last_headers_ms: float | None = None
 
@@ -40,6 +42,8 @@ class GenericRouter:
         try:
             prediction = self.shadow_router.predict(state, questions)
             self.on_shadow_prediction(query, prediction, session_id)
-        except Exception:
+        except Exception as error:
             # Observability cannot make a customer-facing generic turn fail.
             logger.exception("Shadow MiniLM prediction was not recorded")
+            if self.on_shadow_error is not None:
+                self.on_shadow_error(error)

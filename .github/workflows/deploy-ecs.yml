@@ -1,0 +1,84 @@
+name: Test, build, and deploy phone assistant
+
+# The production runtime moved to GCP. Keep this workflow as an explicit,
+# manual AWS/ECS fallback so a push to origin/master cannot trigger two clouds.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+  ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+  HEALTHCHECK_URL: ${{ vars.HEALTHCHECK_URL }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --extra api --extra bedrock --extra postgres-memory --extra gnani-stt
+      - run: uv run python -m unittest tests.test_enquiry_pipeline
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+      - name: Build and push image
+        id: image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          SHA: ${{ github.sha }}
+        run: |
+          IMAGE_URI="$REGISTRY/$ECR_REPOSITORY:$SHA"
+          docker build --tag "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+          echo "uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+      - name: Save previous task definition for rollback
+        id: previous
+        run: |
+          TASK_ARN=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --query 'services[0].taskDefinition' --output text)
+          echo "arn=$TASK_ARN" >> "$GITHUB_OUTPUT"
+      - name: Render ECS task definition
+        env:
+          IMAGE_URI: ${{ steps.image.outputs.uri }}
+          ECS_EXECUTION_ROLE_ARN: ${{ vars.ECS_EXECUTION_ROLE_ARN }}
+          ECS_TASK_ROLE_ARN: ${{ vars.ECS_TASK_ROLE_ARN }}
+          DATABASE_URL_SECRET_ARN: ${{ vars.DATABASE_URL_SECRET_ARN }}
+          GNANI_API_KEY_SECRET_ARN: ${{ vars.GNANI_API_KEY_SECRET_ARN }}
+          AGENT_API_KEY_SECRET_ARN: ${{ vars.AGENT_API_KEY_SECRET_ARN }}
+          WEBHOOK_SIGNING_SECRET_ARN: ${{ vars.WEBHOOK_SIGNING_SECRET_ARN }}
+          CLOUDWATCH_LOG_GROUP: ${{ vars.CLOUDWATCH_LOG_GROUP }}
+        run: envsubst < infra/aws/ecs-task-definition.json.tpl > task-definition.json
+      - uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        id: deploy
+        continue-on-error: true
+        with:
+          task-definition: task-definition.json
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+      - name: Verify public health endpoint
+        id: health
+        if: steps.deploy.outcome == 'success'
+        continue-on-error: true
+        run: curl --fail --silent --show-error --retry 6 --retry-delay 10 "${HEALTHCHECK_URL}/healthz"
+      - name: Roll back unhealthy deployment
+        if: always() && (steps.deploy.outcome != 'success' || steps.health.outcome != 'success')
+        run: |
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --task-definition "${{ steps.previous.outputs.arn }}" --force-new-deployment
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+          exit 1

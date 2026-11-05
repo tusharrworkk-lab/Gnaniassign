@@ -1341,6 +1341,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+api = [
+    { name = "fastapi" },
+    { name = "uvicorn", extra = ["standard"] },
+]
 bedrock = [
     { name = "boto3" },
 ]
@@ -1364,6 +1368,9 @@ local-laya-fast = [
 postgres-memory = [
     { name = "psycopg", extra = ["binary"] },
 ]
+redis-cache = [
+    { name = "redis" },
+]
 retail-classifier = [
     { name = "torch" },
     { name = "transformers" },
@@ -1385,6 +1392,7 @@ requires-dist = [
     { name = "accelerate", marker = "extra == 'transformers-experiment'" },
     { name = "boto3", marker = "extra == 'bedrock'" },
     { name = "datasets", marker = "extra == 'transformers-experiment'" },
+    { name = "fastapi", marker = "extra == 'api'", specifier = ">=0.115" },
     { name = "google-genai", marker = "extra == 'gemini'" },
     { name = "indic-transliteration", specifier = ">=2.3.82" },
     { name = "langgraph" },
@@ -1395,6 +1403,7 @@ requires-dist = [
     { name = "protobuf", marker = "extra == 'transformers-experiment'", specifier = ">=4" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres-memory'", specifier = ">=3.2" },
     { name = "python-dotenv" },
+    { name = "redis", marker = "extra == 'redis-cache'", specifier = ">=5" },
     { name = "requests" },
     { name = "scikit-learn", marker = "extra == 'decision-model'" },
     { name = "sentencepiece", marker = "extra == 'transformers-experiment'" },
@@ -1404,10 +1413,11 @@ requires-dist = [
     { name = "torch", marker = "extra == 'transformers-experiment'" },
     { name = "transformers", marker = "extra == 'retail-classifier'" },
     { name = "transformers", marker = "extra == 'transformers-experiment'" },
+    { name = "uvicorn", extras = ["standard"], marker = "extra == 'api'", specifier = ">=0.30" },
     { name = "vllm", marker = "extra == 'vllm'" },
     { name = "websockets", marker = "extra == 'gnani-stt'" },
 ]
-provides-extras = ["local-laya", "local-laya-fast", "gnani-stt", "decision-model", "transformers-experiment", "retail-classifier", "vllm", "gemini", "bedrock", "postgres-memory"]
+provides-extras = ["local-laya", "local-laya-fast", "gnani-stt", "decision-model", "transformers-experiment", "retail-classifier", "vllm", "gemini", "bedrock", "postgres-memory", "redis-cache", "api"]
 
 [[package]]
 name = "google-auth"
@@ -4367,6 +4377,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/5f/18/6c2a20d00dff254f154fb3b951f4e5a0377a60122c17385e5f08d5f5b5e1/quack_kernels-0.6.5.tar.gz", hash = "sha256:dd9405a4a6fa35fc3a5a18fe35b46a14b0bf7e3ad9fe2451903e355047ac471d", size = 846876, upload-time = "2026-09-11T05:08:20.621Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/73/d8/f5e56c38b286308d115a171e3c5c44f24e9d03980c3cfd22588df40261fa/quack_kernels-0.6.5-py3-none-any.whl", hash = "sha256:df1ddd31366c82eb9692fe087c671209189dcbde53c909c81a865d4ee66b158d", size = 729615, upload-time = "2026-09-11T05:08:19.306Z" },
+]
+
+[[package]]
+name = "redis"
+version = "8.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a8/99/604f0b666d4c616d891cf77ebb9db6bb21601344c051aebf1b72b9ff915f/redis-8.1.0.tar.gz", hash = "sha256:6e1a19beef9225c83efd689c7e6b7da2d5215b1f42cd13b7fc3714d0a09c7b25", size = 5254356, upload-time = "2026-07-30T08:51:00.269Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/66/9d/c5731f6e3608663d4d3656fd8d3aecee8b509c3082818f5a13eae925baea/redis-8.1.0-py3-none-any.whl", hash = "sha256:a4fe1aac3d3b3cc791d4b3d5931c5a956045dc951ee74d1c913ee3ac4d2ee9fb", size = 560618, upload-time = "2026-07-30T08:50:58.497Z" },
 ]
 
 [[package]]

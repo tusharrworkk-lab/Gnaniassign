@@ -1,0 +1,86 @@
+name: gnani-local-cloud
+
+# A small single-host rehearsal of the production topology. Only the API is
+# exposed to the host; PostgreSQL and Redis are reachable solely on Docker's
+# internal network. It is intentionally for development/testing, not an HA
+# production database deployment.
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - ${LOCAL_CLOUD_ENV_FILE:-.env.local-cloud}
+    environment:
+      AGENT_ENVIRONMENT: development
+      EPISODIC_MEMORY_DATABASE_URL: postgresql://agent:${POSTGRES_PASSWORD}@postgres:5432/agent
+      CONVERSATION_LOG_DATABASE_URL: postgresql://agent:${POSTGRES_PASSWORD}@postgres:5432/agent
+      KNOWLEDGE_BASE_DATABASE_URL: postgresql://agent:${POSTGRES_PASSWORD}@postgres:5432/agent
+      ORDER_DATA_DATABASE_URL: postgresql://agent:${POSTGRES_PASSWORD}@postgres:5432/agent
+      PROMPT_TREE_DATABASE_URL: postgresql://agent:${POSTGRES_PASSWORD}@postgres:5432/agent
+      INTENT_FEEDBACK_DATABASE_URL: postgresql://agent:${POSTGRES_PASSWORD}@postgres:5432/agent
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      # Caddy is the only public entrypoint. Keep the application reachable
+      # from the VM itself for the reverse proxy, never directly from the
+      # network.
+      - "127.0.0.1:${LOCAL_CLOUD_API_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [private]
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: agent
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.local-cloud}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/episodic_memory.sql:/docker-entrypoint-initdb.d/10-episodic-memory.sql:ro
+      - ./infra/postgres/conversation_analytics.sql:/docker-entrypoint-initdb.d/20-conversation-analytics.sql:ro
+      - ./infra/postgres/intent_feedback.sql:/docker-entrypoint-initdb.d/30-intent-feedback.sql:ro
+      - ./infra/postgres/customer_orders.sql:/docker-entrypoint-initdb.d/40-customer-orders.sql:ro
+      - ./infra/postgres/knowledge_base.sql:/docker-entrypoint-initdb.d/50-knowledge-base.sql:ro
+      - ./infra/postgres/prompt_trees.sql:/docker-entrypoint-initdb.d/60-prompt-trees.sql:ro
+      - ./infra/postgres/personal_phone_prompt_tree.sql:/docker-entrypoint-initdb.d/70-personal-phone-prompt.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [private]
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [private]
+    restart: unless-stopped
+
+networks:
+  # PostgreSQL and Redis have no host ports, so they stay inaccessible from the
+  # internet. This network must not be Docker-internal because the API's
+  # published host port needs to be reachable by the VM firewall/ALB.
+  private: {}
+
+volumes:
+  postgres-data:
+  redis-data:

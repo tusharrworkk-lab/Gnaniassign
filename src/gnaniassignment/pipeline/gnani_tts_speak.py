@@ -9,7 +9,7 @@ from collections.abc import Callable
 from typing import Any
 
 from gnaniassignment.app.config import load_environment
-from gnaniassignment.tts.gnani import GnaniRealtimeTts
+from gnaniassignment.voice.providers import create_tts_provider
 
 
 async def speak(
@@ -27,7 +27,7 @@ async def speak(
     after that cue without paying a second TTS first-audio delay.
     """
     load_environment()
-    async with GnaniRealtimeTts() as tts:
+    async with create_tts_provider() as tts:
         started = time.perf_counter()
         first_playback_ms: float | None = None
         command = ["aplay", "-q"]

@@ -9,10 +9,16 @@ wheels/
 # Virtual environments
 .venv
 
+# Frontend dependencies and generated Vite output.
+frontend/node_modules/
+frontend/dist/
+
 # Local API credentials
 .env
+.env.local-cloud
 .env.*
 !.env.example
+!.env.local-cloud.example
 
 # Machine-specific native laya.cpp checkout, models and service scripts
 local/

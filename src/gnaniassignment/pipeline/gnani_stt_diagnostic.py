@@ -8,23 +8,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from gnaniassignment.app.config import load_environment
-from gnaniassignment.stt.gnani import GnaniRealtimeStt
+from gnaniassignment.voice.providers import create_stt_provider
 
 
 async def probe() -> list[str]:
     """Open and validate the Gnani handshake; no PCM data is transmitted."""
     load_environment()
-    stt = GnaniRealtimeStt()
+    stt = create_stt_provider()
     lines = [
-        f"requested_language: {stt.language_code}",
+        f"requested_language: {getattr(stt, 'language_code', 'provider-managed')}",
         f"requested_sample_rate: {stt.sample_rate}",
-        f"expected_frame_bytes: 1024",
-        f"expected_frame_cadence_ms: {stt.frame_interval_seconds * 1000:.0f}",
+        f"expected_frame_bytes: {stt.frame_bytes}",
+        f"expected_frame_cadence_ms: {getattr(stt, 'frame_interval_seconds', 0) * 1000:.0f}",
         f"vad_min_silence_ms: {stt.min_silence_ms}",
     ]
     try:
         async with stt:
-            lines.append(f"acknowledged_sample_rate: {stt.active_sample_rate}")
+            lines.append(f"acknowledged_sample_rate: {getattr(stt, 'active_sample_rate', stt.sample_rate)}")
             lines.append("result: accepted")
     except RuntimeError as error:
         lines.append(f"result: rejected - {error}")

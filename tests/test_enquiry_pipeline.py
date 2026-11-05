@@ -30,6 +30,8 @@ from gnaniassignment.pipeline.gnani_microphone import pcm_frames
 from gnaniassignment.pipeline.laya_benchmark import _same_execution_device
 from gnaniassignment.stt.gnani import GnaniProcessing, GnaniRealtimeStt, GnaniTranscript, GnaniTurnBridge, PCM_FRAME_BYTES
 from gnaniassignment.tts.gnani import GnaniRealtimeTts, decorate_tts_text, should_add_clear_throat
+from gnaniassignment.voice.providers import STT_PROVIDER_FACTORIES, TTS_PROVIDER_FACTORIES, create_stt_provider, create_tts_provider
+from gnaniassignment.prompts.tree import PromptNode, PromptPlan, PromptPlanResolver
 
 
 class Router:
@@ -80,10 +82,11 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result["intent"], "generic")
         self.assertEqual(len(chat.prompts), 1)
 
-    def test_support_prompt_does_not_seed_unsupported_checking_language(self):
-        self.assertNotIn("Main check karke batati hoon", GENERIC_PROMPT)
-        self.assertNotIn("Aap order ID bata dijiye", GENERIC_PROMPT)
-        self.assertIn("You have no live order-operation tool", GENERIC_PROMPT)
+    def test_personal_assistant_prompt_discloses_identity_and_blocks_impersonation(self):
+        self.assertIn("opted in", GENERIC_PROMPT)
+        self.assertIn("Never claim to be the owner or a human", GENERIC_PROMPT)
+        self.assertIn("explicitly authorized", GENERIC_PROMPT)
+        self.assertIn("FIRST-REPLY DISCLOSURE", GENERIC_PROMPT)
 
     def test_session_records_a_complete_conversation_turn_for_review(self):
         class ConversationStore:
@@ -277,8 +280,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_tts_audio_tags_are_allowlisted_and_v3_only(self):
         spoken = decorate_tts_text("Aapka order ID ORD-1042 hai. <shouting> Dhanyavaad.", enabled=True, model="timbre-v3.0", add_clear_throat=True)
-        self.assertIn("<giggle>", spoken)
-        self.assertNotIn("<clears throat>", spoken)
+        self.assertIn("<clears throat>", spoken)
         self.assertIn("<giggle>", spoken)
         self.assertNotIn("<shouting>", spoken)
         self.assertNotIn("<pauses>", spoken)
@@ -289,6 +291,37 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(should_add_clear_throat(700))
         self.assertTrue(should_add_clear_throat(701))
         self.assertFalse(should_add_clear_throat(None))
+
+    def test_voice_provider_registry_has_explicit_adapter_names(self):
+        self.assertIn("gnani", STT_PROVIDER_FACTORIES)
+        self.assertIn("gnani", TTS_PROVIDER_FACTORIES)
+        with self.assertRaisesRegex(ValueError, "Unsupported STT_PROVIDER"):
+            create_stt_provider("not-a-provider")
+        with self.assertRaisesRegex(ValueError, "Unsupported TTS_PROVIDER"):
+            create_tts_provider("not-a-provider")
+
+    def test_prompt_tree_selects_only_deterministic_matching_nodes_and_caches_l1(self):
+        plan = PromptPlan(
+            tenant_id="tenant-a", agent_id="generic", version=7,
+            nodes=(
+                PromptNode("root", None, {}, "Base", 10),
+                PromptNode("voice", "root", {"channel": "voice"}, "Voice", 20),
+                PromptNode("refund", "root", {"intent": "refund"}, "Refund", 30),
+            ),
+        )
+        self.assertEqual(plan.render({"channel": "voice"}), "Base\n\nVoice")
+
+        class Store:
+            def __init__(self): self.calls = 0
+            def load_active(self, tenant_id, agent_id):
+                self.calls += 1
+                return plan
+
+        store = Store()
+        resolver = PromptPlanResolver(store, ttl_seconds=60)
+        self.assertEqual(resolver.resolve("tenant-a", "generic"), plan)
+        self.assertEqual(resolver.resolve("tenant-a", "generic"), plan)
+        self.assertEqual(store.calls, 1)
 
     def test_latency_giggle_renders_a_tag_only_tts_request(self):
         self.assertEqual(
@@ -334,7 +367,7 @@ class PipelineTests(unittest.TestCase):
             return socket
 
         async def exercise():
-            stt = GnaniRealtimeStt(api_key="test-key", language_code="hi-IN", sample_rate=16000, connect=connect)
+            stt = GnaniRealtimeStt(api_key="test-key", language_code="hi-IN", sample_rate=16000, min_silence_ms=100, connect=connect)
             self.assertEqual(stt.frame_interval_seconds, 0.032)
             async with stt:
                 self.assertEqual(stt.active_sample_rate, 16000)
@@ -562,7 +595,8 @@ class PipelineTests(unittest.TestCase):
                 self.request = (url, kwargs)
                 return Response()
 
-        router = LayaCppRouter(api_key="local-key")
+        router = LayaCppRouter(base_url=DEFAULT_LAYA_CPP_URL, api_key="local-key")
+        router.model = DEFAULT_LAYA_CPP_MODEL
         router.http = HTTP()
         state = {"current_query": "Where do you operate?", "recent_conversation": []}
         result = router.predict(state, QUESTIONS)
