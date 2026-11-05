@@ -161,6 +161,19 @@ def _verify_webhook(raw_body: bytes, signature: str | None) -> None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook signature")
 
 
+def _authorize_voicelink_websocket(token: str | None) -> bool:
+    """Authenticate the telephony media stream before accepting the upgrade.
+
+    VoiceLink documents the WebSocket URL but no request-header authentication
+    field. A secret query parameter works with a standard WSS URL and keeps
+    this provider adapter fail-closed in production.
+    """
+    configured = os.getenv("VOICELINK_WS_TOKEN")
+    if not configured:
+        return os.getenv("AGENT_ENVIRONMENT", "development").lower() != "production"
+    return token is not None and hmac.compare_digest(token, configured)
+
+
 def _prompt_plan_payload(plan: PromptPlan | None) -> dict[str, Any]:
     runtime_enabled = os.getenv("PROMPT_TREE_ENABLED", "false").lower() == "true"
     if plan is None:
@@ -204,6 +217,11 @@ def create_app(registry: SessionRegistry | None = None) -> FastAPI:
     @app.websocket("/v1/media/voicelink")
     async def voicelink_media(websocket: WebSocket) -> None:
         """VoiceLink's documented bidirectional A-law media stream."""
+        if not _authorize_voicelink_websocket(websocket.query_params.get("token")):
+            # Do not accept an unauthenticated upgrade; 1008 is the standard
+            # WebSocket policy-violation close code.
+            await websocket.close(code=1008)
+            return
         from gnaniassignment.telephony.voicelink import handle_voicelink_websocket
         try:
             await handle_voicelink_websocket(websocket, sessions.events)
