@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -200,6 +200,15 @@ def create_app(registry: SessionRegistry | None = None) -> FastAPI:
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok", "time": datetime.now(UTC).isoformat()}
+
+    @app.websocket("/v1/media/voicelink")
+    async def voicelink_media(websocket: WebSocket) -> None:
+        """VoiceLink's documented bidirectional A-law media stream."""
+        from gnaniassignment.telephony.voicelink import handle_voicelink_websocket
+        try:
+            await handle_voicelink_websocket(websocket, sessions.events)
+        except WebSocketDisconnect:
+            return
 
     @app.get("/v1/dashboard/events")
     async def dashboard_events(x_api_key: str | None = Header(default=None)) -> StreamingResponse:
