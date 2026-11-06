@@ -177,11 +177,33 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                                 call.session.record_stt_segment(stt_event.text, stt_event.segment_id, stt_event.latency_ms)
                             if events is not None:
                                 await events.publish("transcript.received", session_id=call.stream_sid, customer_id=call.customer_id, text=stt_event.text)
-                            result = await asyncio.to_thread(call.session.ask, stt_event.text)
-                            await call.metric(llm_completed_ms=round((time.perf_counter()-call.started_at)*1000,1), llm_ttft_ms=result.get("metrics", {}).get("llm_ttft_ms"))
+                            chunks: asyncio.Queue[str] = asyncio.Queue()
+                            loop = asyncio.get_running_loop()
+                            first_chunk_at: float | None = None
+                            def on_chunk(chunk: str) -> None:
+                                loop.call_soon_threadsafe(chunks.put_nowait, chunk)
+                            generation = asyncio.create_task(asyncio.to_thread(call.session.ask_stream, stt_event.text, on_chunk))
+                            pending = ""
+                            while not generation.done() or not chunks.empty():
+                                try:
+                                    chunk = await asyncio.wait_for(chunks.get(), timeout=0.05)
+                                except asyncio.TimeoutError:
+                                    continue
+                                if first_chunk_at is None:
+                                    first_chunk_at = time.perf_counter()
+                                    await call.metric(llm_ttft_ms=round((first_chunk_at-call.started_at)*1000,1))
+                                pending += chunk
+                                # Start audio at a natural sentence boundary, or cap the
+                                # fragment so a slow model never becomes a voice note.
+                                if any(mark in pending for mark in ".!?") or len(pending) >= 90:
+                                    await call.speak_reply(pending.strip())
+                                    pending = ""
+                            result = await generation
+                            if pending.strip():
+                                await call.speak_reply(pending.strip())
+                            await call.metric(llm_completed_ms=round((time.perf_counter()-call.started_at)*1000,1))
                             if events is not None:
                                 await events.publish("agent.responded", session_id=call.stream_sid, intent=result["intent"], text=result["spoken"])
-                            await call.speak_reply(result["spoken"])
                         elif isinstance(stt_event, VoiceError) and events is not None:
                             await events.publish("stt.failed", session_id=call.stream_sid, message=stt_event.message[:300])
 
