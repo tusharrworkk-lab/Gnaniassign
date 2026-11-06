@@ -237,6 +237,12 @@ def create_app(registry: SessionRegistry | None = None) -> FastAPI:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    @app.get("/v1/dashboard/latency")
+    async def dashboard_latency(limit: int = 100, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        from gnaniassignment.telephony.latency import CallLatencyStore
+        return {"calls": await asyncio.to_thread(CallLatencyStore().recent, max(1, min(limit, 500)))}
+
     @app.get("/v1/dashboard/prompt-plan")
     async def dashboard_prompt_plan(x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
         _require_api_key(x_api_key)

@@ -13,6 +13,7 @@ import base64
 import binascii
 import json
 import logging
+import time
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -23,6 +24,7 @@ from gnaniassignment.app.container import create_session
 from gnaniassignment.stt.gnani import GnaniRealtimeStt
 from gnaniassignment.tts.gnani import GnaniRealtimeTts
 from gnaniassignment.voice.events import VoiceError, VoiceTranscript
+from gnaniassignment.telephony.latency import CallLatencyStore
 
 
 VOICE_LINK_SAMPLE_RATE = 8000
@@ -61,6 +63,13 @@ class VoiceLinkCall:
     pcm_buffer: bytearray = field(default_factory=bytearray)
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     inbound_packets: int = 0
+    started_at: float = field(default_factory=time.perf_counter)
+    latency_store: CallLatencyStore | None = None
+
+    async def metric(self, **values: Any) -> None:
+        values["elapsed_ms"] = round((time.perf_counter() - self.started_at) * 1000, 1)
+        if self.latency_store is not None:
+            await asyncio.to_thread(self.latency_store.record, self.stream_sid, self.call_sid, self.customer_id, values)
 
     async def send_media(self, pcm: bytes) -> None:
         """Resample linear TTS PCM and send the documented outbound frame."""
@@ -82,6 +91,7 @@ class VoiceLinkCall:
     async def feed_media(self, payload: str) -> None:
         """Decode, resample, and frame inbound VoiceLink audio for Gnani."""
         self.inbound_packets += 1
+        if self.inbound_packets == 1: await self.metric(media_first_packet_ms=round((time.perf_counter()-self.started_at)*1000,1))
         if self.inbound_packets == 1 or self.inbound_packets % 100 == 0:
             logger.info("voicelink inbound media: stream=%s packets=%d", self.stream_sid, self.inbound_packets)
         pcm_8k = _decode_alaw(payload)
@@ -152,6 +162,8 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                 await stt.__aenter__()
                 await tts.__aenter__()
                 call = VoiceLinkCall(websocket, stream_sid, call_sid, caller_id, customer_id, stt, tts, create_session(customer_id=customer_id))
+                call.latency_store = CallLatencyStore() if os.getenv("CALL_LATENCY_METRICS_ENABLED", "true").lower() == "true" else None
+                await call.metric(call_started=True)
                 logger.info("voicelink call started: stream=%s call=%s", stream_sid, call_sid)
                 if events is not None:
                     await events.publish("call.started", session_id=stream_sid, caller_id=caller_id, call_id=call_sid, channel="voicelink")
@@ -160,11 +172,13 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                     assert call is not None
                     async for stt_event in call.stt.events():
                         if isinstance(stt_event, VoiceTranscript) and stt_event.text.strip():
+                            await call.metric(stt_final_ms=round((time.perf_counter()-call.started_at)*1000,1), stt_provider_latency_ms=stt_event.latency_ms)
                             if hasattr(call.session, "record_stt_segment"):
                                 call.session.record_stt_segment(stt_event.text, stt_event.segment_id, stt_event.latency_ms)
                             if events is not None:
                                 await events.publish("transcript.received", session_id=call.stream_sid, customer_id=call.customer_id, text=stt_event.text)
                             result = await asyncio.to_thread(call.session.ask, stt_event.text)
+                            await call.metric(llm_completed_ms=round((time.perf_counter()-call.started_at)*1000,1), llm_ttft_ms=result.get("metrics", {}).get("llm_ttft_ms"))
                             if events is not None:
                                 await events.publish("agent.responded", session_id=call.stream_sid, intent=result["intent"], text=result["spoken"])
                             await call.speak_reply(result["spoken"])
@@ -196,6 +210,7 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
         if call is not None:
             if hasattr(call.session, "finalize_call"):
                 await asyncio.to_thread(call.session.finalize_call)
+            await call.metric(call_ended=True, inbound_packets=call.inbound_packets)
             await call.tts.__aexit__(None, None, None)
             await call.stt.__aexit__(None, None, None)
             if events is not None:

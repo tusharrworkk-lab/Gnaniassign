@@ -54,6 +54,7 @@ services:
       - ./infra/postgres/knowledge_base.sql:/docker-entrypoint-initdb.d/50-knowledge-base.sql:ro
       - ./infra/postgres/prompt_trees.sql:/docker-entrypoint-initdb.d/60-prompt-trees.sql:ro
       - ./infra/postgres/personal_phone_prompt_tree.sql:/docker-entrypoint-initdb.d/70-personal-phone-prompt.sql:ro
+      - ./infra/postgres/call_latency_metrics.sql:/docker-entrypoint-initdb.d/80-call-latency-metrics.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U agent -d agent"]
       interval: 5s
