@@ -15,6 +15,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, AsyncIterator
+from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,6 +32,16 @@ class TurnRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     customer_id: str = Field(min_length=1, max_length=256)
     session_id: str | None = Field(default=None, max_length=256)
+
+
+class HarnessConversationCreate(BaseModel):
+    """Start an isolated, text-only agent conversation for evaluation."""
+
+    customer_id: str = Field(default="harness", min_length=1, max_length=256)
+
+
+class HarnessConversationTurn(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
 
 
 class CallWebhook(BaseModel):
@@ -99,6 +110,7 @@ class SessionRegistry:
     """One-process session registry; replace with Redis ownership for replicas."""
 
     sessions: dict[str, TurnSession] = field(default_factory=dict)
+    turn_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     events: RuntimeEvents = field(default_factory=RuntimeEvents)
 
@@ -112,7 +124,25 @@ class SessionRegistry:
                     shadow_error_observer=lambda error: self._shadow_failed(session_id, error),
                 )
                 self.sessions[session_id] = session
+                self.turn_locks[session_id] = asyncio.Lock()
             return session
+
+    async def get(self, session_id: str) -> TurnSession | None:
+        """Return an existing session without accidentally creating one."""
+        async with self.lock:
+            return self.sessions.get(session_id)
+
+    async def run_turn(self, session_id: str, text: str) -> dict[str, Any] | None:
+        """Serialize turns in a session so concurrent harness requests cannot
+        reorder the agent's history or working memory.
+        """
+        async with self.lock:
+            session = self.sessions.get(session_id)
+            turn_lock = self.turn_locks.get(session_id)
+        if session is None or turn_lock is None:
+            return None
+        async with turn_lock:
+            return await asyncio.to_thread(session.ask, text)
 
     def _shadow_complete(self, session_id: str, prediction: dict[str, Any]) -> None:
         decision = prediction.get("answers", {}).get("intent", {})
@@ -136,7 +166,16 @@ class SessionRegistry:
 
     async def end(self, session_id: str) -> dict[str, object] | None:
         async with self.lock:
-            session = self.sessions.pop(session_id, None)
+            session = self.sessions.get(session_id)
+            turn_lock = self.turn_locks.get(session_id)
+        if session is None or turn_lock is None:
+            return None
+        async with turn_lock:
+            async with self.lock:
+                # A completed session cannot be resurrected by a late request.
+                if self.sessions.pop(session_id, None) is None:
+                    return None
+                self.turn_locks.pop(session_id, None)
         return await asyncio.to_thread(session.finalize_call) if session is not None else None
 
 
@@ -193,6 +232,25 @@ def _prompt_plan_payload(plan: PromptPlan | None) -> dict[str, Any]:
                 "parent_id": node.parent_id,
             }
             for node in plan.nodes
+        ],
+    }
+
+
+def _harness_conversation_payload(conversation_id: str, session: TurnSession) -> dict[str, Any]:
+    """Expose only the evaluation state needed to inspect dialogue behaviour."""
+    return {
+        "conversation_id": conversation_id,
+        "customer_id": session.customer_id,
+        "working_memory": dict(session.working_memory),
+        "turns": [
+            {
+                "turn_number": index,
+                "user": turn.query,
+                "assistant": turn.answer,
+                "intent": turn.intent,
+                "topic": turn.topic,
+            }
+            for index, turn in enumerate(session.call_turns, start=1)
         ],
     }
 
@@ -285,6 +343,72 @@ def create_app(registry: SessionRegistry | None = None) -> FastAPI:
         result = await asyncio.to_thread(session.ask, payload.text)
         await sessions.events.publish("agent.responded", session_id=session_id, intent=result["intent"], text=result["spoken"])
         return {"session_id": session_id, "answer": result["spoken"], "intent": result["intent"]}
+
+    @app.post("/v1/harness/conversations", status_code=status.HTTP_201_CREATED)
+    async def harness_create_conversation(
+        payload: HarnessConversationCreate,
+        x_api_key: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Create a text-only conversation whose state stays isolated by ID."""
+        _require_api_key(x_api_key)
+        conversation_id = f"harness:{uuid4()}"
+        session = await sessions.get_or_create(conversation_id, payload.customer_id)
+        await sessions.events.publish(
+            "harness.started", session_id=conversation_id, customer_id=payload.customer_id
+        )
+        return _harness_conversation_payload(conversation_id, session)
+
+    @app.get("/v1/harness/conversations/{conversation_id}")
+    async def harness_get_conversation(
+        conversation_id: str,
+        x_api_key: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        session = await sessions.get(conversation_id)
+        if session is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Harness conversation not found or already ended")
+        return _harness_conversation_payload(conversation_id, session)
+
+    @app.post("/v1/harness/conversations/{conversation_id}/turn")
+    async def harness_turn(
+        conversation_id: str,
+        payload: HarnessConversationTurn,
+        x_api_key: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Run one turn through the normal agent graph, without STT or TTS."""
+        _require_api_key(x_api_key)
+        session = await sessions.get(conversation_id)
+        if session is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Harness conversation not found or already ended")
+        await sessions.events.publish(
+            "harness.transcript.received", session_id=conversation_id, customer_id=session.customer_id, text=payload.text
+        )
+        result = await sessions.run_turn(conversation_id, payload.text)
+        if result is None:  # Defensive: it may have ended while the request was queued.
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Harness conversation not found or already ended")
+        await sessions.events.publish(
+            "harness.agent.responded", session_id=conversation_id, intent=result["intent"], text=result["spoken"]
+        )
+        state = _harness_conversation_payload(conversation_id, session)
+        return {
+            **state,
+            "answer": result["spoken"],
+            "intent": result["intent"],
+            "topic": result.get("topic"),
+            "metrics": result.get("metrics", {}),
+        }
+
+    @app.post("/v1/harness/conversations/{conversation_id}/end")
+    async def harness_end_conversation(
+        conversation_id: str,
+        x_api_key: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        if await sessions.get(conversation_id) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Harness conversation not found or already ended")
+        judgment = await sessions.end(conversation_id)
+        await sessions.events.publish("harness.ended", session_id=conversation_id)
+        return {"conversation_id": conversation_id, "ended": True, "judgment": judgment}
 
     @app.post("/v1/webhooks/call")
     async def call_webhook(request: Request, x_webhook_signature: str | None = Header(default=None)) -> dict[str, object]:
