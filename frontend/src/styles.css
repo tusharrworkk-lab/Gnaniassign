@@ -60,3 +60,37 @@ body { scrollbar-color:#9eaa9f #f8f5ee; } ::selection { background:#cde9d7; colo
 .activity-page { padding-top:4px; }.activity-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }.activity-heading .page-intro { max-width:236px; margin-bottom:16px; }.activity-heading .status-pill { margin-top:6px; font-size:10px; }
 .event-list { border-top:1px solid #ddd6ca; }.event-row { display:grid; grid-template-columns:13px 1fr auto; align-items:start; gap:9px; padding:14px 0; border-bottom:1px solid #ddd6ca; }.event-dot { width:7px; height:7px; margin-top:5px; border-radius:50%; background:#849187; }.event-dot.transcript { background:#8a603d; }.event-dot.classifier { background:#477c62; box-shadow:0 0 0 3px rgba(71,124,98,.13); }.event-dot.agent { background:#bd7541; }.event-dot.call { background:#6b8d71; }.event-dot.prompt { background:#547e96; }.event-row div { min-width:0; }.event-row strong { display:block; color:#2d4a37; font-size:12px; }.event-row p { margin:3px 0 0; color:#57685b; font-size:11px; line-height:1.42; overflow-wrap:anywhere; }.event-row time { padding-top:1px; color:#788479; font-size:10px; font-variant-numeric:tabular-nums; white-space:nowrap; }.event-empty { display:grid; justify-items:start; gap:7px; min-height:160px; padding:25px 0; border-top:1px solid #ddd6ca; border-bottom:1px solid #ddd6ca; color:#3f6d50; }.event-empty strong { color:#2d4b39; font-size:14px; }.event-empty p { max-width:260px; margin:0; color:#5e6d61; font-size:12px; line-height:1.5; }.activity-divider { height:1px; margin:26px 0 0; background:#d4ded2; }.activity-subhead { margin:18px 0 0; color:#2d4b39; font-size:16px; letter-spacing:-.025em; }
 @media (min-width:520px) { .app-shell { height:844px; min-height:844px; } }
+
+/* Conversation harness: deliberate text-only evaluation, kept inside Setup so
+   operational navigation remains the stable four-item phone rail. */
+.setup-tabs-three { grid-template-columns:repeat(3,1fr); }
+.setup-tabs-three button { min-width:0; padding:0 4px; font-size:10px; }
+.setup-tabs-three .icon { flex:0 0 auto; }
+.harness-view { padding-bottom:8px; }
+.harness-start { display:grid; gap:8px; margin-top:18px; }
+.harness-start label,.harness-composer label { color:#3b5847; font-size:11px; font-weight:800; }
+.harness-start input,.harness-composer textarea { width:100%; border:1px solid #cfd5ca; border-radius:8px; outline:0; background:#fffdf8; color:#314838; font:inherit; font-size:12px; }
+.harness-start input { min-height:44px; padding:0 11px; }
+.harness-composer textarea { min-height:92px; padding:10px; resize:vertical; line-height:1.45; }
+.harness-start input:focus,.harness-composer textarea:focus { border-color:#669d78; box-shadow:0 0 0 3px rgba(102,157,120,.15); }
+.harness-session { display:grid; grid-template-columns:1fr 44px; gap:4px 10px; align-items:center; margin:17px 0 0; padding:12px 0; border-top:1px solid #ddd6ca; border-bottom:1px solid #ddd6ca; }
+.harness-session span { color:#536357; font-size:10px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; }
+.harness-session code { min-width:0; overflow:hidden; color:#3e684d; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
+.harness-session .row-icon { grid-column:2; grid-row:1 / span 2; }
+.harness-transcript { display:grid; gap:0; margin-top:14px; border-top:1px solid #ddd6ca; }
+.harness-turn { padding:14px 0; border-bottom:1px solid #ddd6ca; }
+.harness-turn p { display:grid; grid-template-columns:42px 1fr; gap:8px; margin:0; font-size:12px; line-height:1.48; }
+.harness-turn p + p { margin-top:7px; }
+.harness-turn p > span { color:#405a49; overflow-wrap:anywhere; }
+.harness-user { color:#7f5230; font-weight:800; }.harness-agent { color:#376e50; font-weight:800; }
+.harness-turn small { display:block; margin:9px 0 0 50px; color:#69776b; font-size:10px; }
+.harness-empty { padding:25px 0; color:#596c5d; font-size:12px; line-height:1.5; }
+.harness-composer { display:grid; gap:8px; margin-top:18px; }
+.harness-composer .approve-button { margin-top:0; }
+.memory-inspector { margin-top:18px; border-top:1px solid #ddd6ca; border-bottom:1px solid #ddd6ca; }
+.memory-inspector summary { min-height:48px; display:flex; align-items:center; justify-content:space-between; cursor:pointer; color:#355641; font-size:12px; font-weight:800; }
+.memory-inspector summary span { color:#64746a; font-size:10px; font-weight:700; }
+.memory-inspector pre { max-height:180px; margin:0 0 13px; overflow:auto; padding:11px; border:1px solid #d9e1d8; border-radius:8px; background:#f1f6f0; color:#365542; font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; }
+.harness-end { width:100%; justify-content:center; margin-top:10px; color:#8b572f; }
+.harness-error { margin:14px 0 0; padding:10px 0; color:#934a20; font-size:11px; line-height:1.45; border-top:1px solid #dfc5ae; }
+.harness-view code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }

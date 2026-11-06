@@ -41,6 +41,32 @@ export function appendPromptNode({ instruction, priority = 100, condition = {} }
   });
 }
 
+export function createHarnessConversation(customerId) {
+  return request("/v1/harness/conversations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ customer_id: customerId || "harness" }),
+  });
+}
+
+export function fetchHarnessConversation(conversationId) {
+  return request(`/v1/harness/conversations/${encodeURIComponent(conversationId)}`);
+}
+
+export function sendHarnessTurn(conversationId, text) {
+  return request(`/v1/harness/conversations/${encodeURIComponent(conversationId)}/turn`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+}
+
+export function endHarnessConversation(conversationId) {
+  return request(`/v1/harness/conversations/${encodeURIComponent(conversationId)}/end`, {
+    method: "POST",
+  });
+}
+
 // SSE is read with fetch rather than EventSource so a development API key can
 // be sent in a header. It automatically exits when its AbortSignal is aborted.
 export async function streamRuntimeEvents(onEvent, signal) {

@@ -30,6 +30,24 @@ version; existing calls keep their already-resolved prompt and new calls use
 the new version. The **Calls** tab consumes the API's live event stream for
 STT, response, and MiniLM shadow events.
 
+## Conversation harness
+
+Open **Setup → Test chat** to run a real, text-only multi-turn conversation
+through the same LLM graph used by the voice agent. It creates an isolated
+harness conversation, shows every reply, intent/topic route, and current
+working memory, and ends the session on demand. No STT, TTS, or telephony is
+used.
+
+To test the deployed API from this local Vite frontend, use:
+
+```dotenv
+VITE_AGENT_API_URL=https://voice.sidecut.me
+VITE_AGENT_API_KEY=your-local-copy-of-AGENT_API_KEY
+```
+
+Keep this configuration in `.env.local`; never commit it or use it in a
+public deployment, because `VITE_` variables become visible in the browser.
+
 For shadow classification, keep the live router generic and enable the
 background model only after its local checkpoint and `retail-classifier` extra
 are installed:

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { appendPromptNode, dashboardApiConfigured, dashboardDemo, fetchPromptPlan, streamRuntimeEvents } from "./api/client";
+import { appendPromptNode, createHarnessConversation, dashboardApiConfigured, dashboardDemo, endHarnessConversation, fetchHarnessConversation, fetchPromptPlan, sendHarnessTurn, streamRuntimeEvents } from "./api/client";
 
 const iconPaths = {
   home: <><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1Z" /></>,
@@ -19,6 +19,7 @@ const iconPaths = {
   plus: <><path d="M12 5v14M5 12h14" /></>,
   eye: <><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" /><circle cx="12" cy="12" r="2.5" /></>,
   refresh: <><path d="M20 11a8 8 0 1 0 2 5.5" /><path d="M20 4v7h-7" /></>,
+  message: <><path d="M20 15a4 4 0 0 1-4 4H8l-4 3v-7a4 4 0 0 1-2-3.5v-5A4 4 0 0 1 6 3h10a4 4 0 0 1 4 4Z" /><path d="M7 10h10M7 14h6" /></>,
   link: <><path d="M10 13a5 5 0 0 0 7.1.1l2.3-2.3a5 5 0 0 0-7.1-7.1l-1.3 1.3" /><path d="M14 11a5 5 0 0 0-7.1-.1l-2.3 2.3a5 5 0 0 0 7.1 7.1l1.3-1.3" /></>,
   more: <><circle cx="5" cy="12" r=".8" fill="currentColor" /><circle cx="12" cy="12" r=".8" fill="currentColor" /><circle cx="19" cy="12" r=".8" fill="currentColor" /></>,
 };
@@ -210,22 +211,75 @@ function SettingsView({ instructionNodes, setInstructionNodes, preCallTools, set
   const toggleTool = (id) => setPreCallTools((tools) => tools.map((tool) => tool.id === id ? { ...tool, enabled: !tool.enabled } : tool));
   return <section className="tab-page setup-page">
     <div className="setup-head"><div><h2>Agent setup</h2><p className="page-intro">Shape what Relay knows before a caller says hello.</p></div><StatusPill tone={isLive && promptRuntimeEnabled ? "mint" : "slate"}>{isLive && promptRuntimeEnabled ? `Published${promptVersion ? ` v${promptVersion}` : ""}` : isLive ? "Stored · off" : "Preview"}</StatusPill></div>
-    <div className="setup-tabs" role="tablist" aria-label="Agent setup">
+    <div className="setup-tabs setup-tabs-three" role="tablist" aria-label="Agent setup">
       <button role="tab" aria-selected={section === "instructions"} className={section === "instructions" ? "selected" : ""} onClick={() => setSection("instructions")}><Icon name="branch" size={17} />Instructions</button>
       <button role="tab" aria-selected={section === "mcp"} className={section === "mcp" ? "selected" : ""} onClick={() => setSection("mcp")}><Icon name="plug" size={17} />MCP prep</button>
+      <button role="tab" aria-selected={section === "harness"} className={section === "harness" ? "selected" : ""} onClick={() => setSection("harness")}><Icon name="message" size={17} />Test chat</button>
     </div>
     {section === "instructions" ? <>
       <section className="setup-hero" aria-labelledby="instruction-stack"><div className="setup-hero-mark"><Icon name="sliders" size={21} /></div><div><h3 id="instruction-stack">Instruction stack</h3><p>{instructionNodes.length} small rules assemble into the active voice prompt</p></div><span>{promptVersion ? `v${promptVersion}` : "local"}</span></section>
       <div className="setup-route" aria-label="Prompt assembly"><span>Rules</span><i /><span>Prompt</span><i /><span>Call</span></div>
       <div className="instruction-list">{instructionNodes.map((node, index) => <article className="instruction-row" key={node.id}><div className="instruction-order">{index + 1}</div><div><strong>{node.name}</strong><small>{node.detail}</small><p>{node.instruction}</p></div><button className="row-icon" aria-label={`View ${node.name}`} onClick={() => onNotice(node.instruction)}><Icon name="eye" size={17} /></button></article>)}</div>
       {showEditor ? <div className="inline-editor"><label htmlFor="instruction">New instruction</label><textarea id="instruction" value={newInstruction} onChange={(event) => setNewInstruction(event.target.value)} placeholder="Tell Relay exactly how to respond in this situation" /><div><button className="change-button" onClick={() => setShowEditor(false)} disabled={savingInstruction}>Cancel</button><button className="compact-primary" onClick={addInstruction} disabled={savingInstruction}>{savingInstruction ? "Publishing…" : "Add rule"}</button></div></div> : <button className="outline-action" onClick={() => setShowEditor(true)}><Icon name="plus" size={18} />Add instruction</button>}
-    </> : <>
+    </> : section === "mcp" ? <>
       <section className="setup-hero mcp-hero" aria-labelledby="pre-call-readiness"><div className="setup-hero-mark"><Icon name="database" size={21} /></div><div><h3 id="pre-call-readiness">Pre-call readiness</h3><p>{enabledCount} read-only source{enabledCount === 1 ? "" : "s"} prepare caller context</p></div><span>Ready</span></section>
       <p className="safe-note"><Icon name="shield" size={16} />Only approved read-only tools run before a call. The browser never receives credentials.</p>
       <section className="mcp-connection"><div className="connection-top"><div><span>Remote MCP server</span><strong>Customer context gateway</strong><small>Streamable HTTP · token stored server-side</small></div><StatusPill>Connected</StatusPill></div><button className="plain-link" onClick={() => onNotice("Tool discovery will run from the backend after the MCP configuration API is connected.")}>Refresh tool list <Icon name="refresh" size={16} /></button></section>
       <div className="tool-list">{preCallTools.map((tool) => <article className="tool-row" key={tool.id}><div className="tool-icon"><Icon name={tool.icon} size={18} /></div><div><strong>{tool.name}</strong><small>{tool.description}</small><em>{tool.scope}</em></div><button className={`tool-toggle ${tool.enabled ? "on" : ""}`} aria-pressed={tool.enabled} aria-label={`${tool.enabled ? "Disable" : "Enable"} ${tool.name} before calls`} onClick={() => toggleTool(tool.id)}><i /></button></article>)}</div>
       {showServer ? <div className="inline-editor"><label htmlFor="server">Server name</label><input id="server" value={serverName} onChange={(event) => setServerName(event.target.value)} placeholder="e.g. CRM context" /><small>Endpoint and secret reference are saved by the backend, not this WebView.</small><div><button className="change-button" onClick={() => setShowServer(false)}>Cancel</button><button className="compact-primary" onClick={addServer}>Save server</button></div></div> : <button className="outline-action" onClick={() => setShowServer(true)}><Icon name="plus" size={18} />Add MCP server</button>}
+    </> : <HarnessView />}
+  </section>;
+}
+
+function HarnessView() {
+  const [customerId, setCustomerId] = useState("tushar-harness");
+  const [conversation, setConversation] = useState(null);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const start = async () => {
+    setBusy(true); setError("");
+    try { setConversation(await createHarnessConversation(customerId.trim() || "harness")); }
+    catch (requestError) { setError(requestError.message); }
+    finally { setBusy(false); }
+  };
+  const send = async (event) => {
+    event.preventDefault();
+    const cleanText = text.trim();
+    if (!cleanText || !conversation || busy) return;
+    setBusy(true); setError("");
+    try { setConversation(await sendHarnessTurn(conversation.conversation_id, cleanText)); setText(""); }
+    catch (requestError) { setError(requestError.message); }
+    finally { setBusy(false); }
+  };
+  const refresh = async () => {
+    if (!conversation || busy) return;
+    setBusy(true); setError("");
+    try { setConversation(await fetchHarnessConversation(conversation.conversation_id)); }
+    catch (requestError) { setError(requestError.message); }
+    finally { setBusy(false); }
+  };
+  const end = async () => {
+    if (!conversation || busy) return;
+    setBusy(true); setError("");
+    try { await endHarnessConversation(conversation.conversation_id); setConversation(null); }
+    catch (requestError) { setError(requestError.message); }
+    finally { setBusy(false); }
+  };
+
+  if (!dashboardApiConfigured) return <section className="harness-view" aria-labelledby="harness-title"><div className="setup-hero"><div className="setup-hero-mark"><Icon name="message" size={21} /></div><div><h3 id="harness-title">Conversation harness</h3><p>Test the real LLM flow without a call.</p></div><span>Offline</span></div><p className="safe-note"><Icon name="shield" size={16} />Set <code>VITE_AGENT_API_URL</code> and a local development API key before running this browser interface. Do not ship an API key in a public WebView.</p></section>;
+
+  return <section className="harness-view" aria-labelledby="harness-title">
+    <div className="setup-hero"><div className="setup-hero-mark"><Icon name="message" size={21} /></div><div><h3 id="harness-title">Conversation harness</h3><p>Same LLM graph, bounded memory, no STT or TTS.</p></div><span>{conversation ? "Active" : "Ready"}</span></div>
+    {!conversation ? <div className="harness-start"><label htmlFor="harness-customer">Test customer ID</label><input id="harness-customer" value={customerId} onChange={(event) => setCustomerId(event.target.value)} maxLength="256" /><button className="outline-action" onClick={start} disabled={busy}>{busy ? "Starting…" : "Start a clean conversation"}</button></div> : <>
+      <div className="harness-session"><span>Conversation</span><code>{conversation.conversation_id}</code><button className="row-icon" onClick={refresh} disabled={busy} aria-label="Refresh conversation state"><Icon name="refresh" size={17} /></button></div>
+      <div className="harness-transcript" aria-live="polite">{conversation.turns?.length ? conversation.turns.map((turn) => <article key={turn.turn_number} className="harness-turn"><p className="harness-user">You <span>{turn.user}</span></p><p className="harness-agent">Relay <span>{turn.assistant}</span></p><small>{turn.intent}{turn.topic ? ` · ${turn.topic}` : ""}</small></article>) : <div className="harness-empty">Your first message will appear here with Relay’s reply and chosen route.</div>}</div>
+      <form className="harness-composer" onSubmit={send}><label htmlFor="harness-text">Your message</label><textarea id="harness-text" value={text} onChange={(event) => setText(event.target.value)} placeholder="Write exactly what a caller would say…" maxLength="4000" disabled={busy} /><button className="approve-button" type="submit" disabled={!text.trim() || busy}>{busy ? "Relay is thinking…" : "Send to Relay"}</button></form>
+      <details className="memory-inspector"><summary>Working memory <span>{Object.keys(conversation.working_memory || {}).length} fields</span></summary><pre>{JSON.stringify(conversation.working_memory || {}, null, 2)}</pre></details>
+      <button className="plain-link harness-end" onClick={end} disabled={busy}>End and clear this test</button>
     </>}
+    {error && <p className="harness-error" role="alert">{error}</p>}
   </section>;
 }
 
