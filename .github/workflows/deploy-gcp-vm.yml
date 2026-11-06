@@ -25,9 +25,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # GitHub-hosted runners include Android, .NET and Haskell SDKs that this
+      # Python voice service never uses. Free the ephemeral runner disk before
+      # uv resolves native voice/ML dependencies and Docker builds the image.
+      - name: Free unused runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          docker image prune --all --force
       - uses: astral-sh/setup-uv@v5
       - name: Install test dependencies
-        run: uv sync --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt --extra silero-vad --extra retail-classifier
+        run: uv sync --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt --extra silero-vad
       - name: Run tests
         run: uv run python -m unittest discover -s tests -p 'test_*.py'
 
@@ -39,6 +46,10 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v4
+      - name: Free unused runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          docker image prune --all --force
       - id: auth
         uses: google-github-actions/auth@v2
         with:
