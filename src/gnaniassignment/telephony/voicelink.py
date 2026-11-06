@@ -294,6 +294,8 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                         call.vad = TenPipecatTurnDetector(
                             threshold=float(os.getenv("VOICE_LINK_TEN_VAD_THRESHOLD", "0.5")),
                             hop_samples=int(os.getenv("VOICE_LINK_TEN_VAD_HOP_SAMPLES", "256")),
+                            min_speech_ms=int(os.getenv("VOICE_LINK_TEN_VAD_MIN_SPEECH_MS", "160")),
+                            min_silence_ms=int(os.getenv("VOICE_LINK_TEN_VAD_MIN_SILENCE_MS", "320")),
                         )
                     elif backend == "silero":
                         from gnaniassignment.voice.silero_vad import SileroVad

@@ -28,7 +28,13 @@ class SemanticTurnDecision:
 class TenPipecatTurnDetector:
     """Streaming acoustic detector with an audio-native semantic endpoint gate."""
 
-    def __init__(self, threshold: float = 0.5, hop_samples: int = 256) -> None:
+    def __init__(
+        self,
+        threshold: float = 0.5,
+        hop_samples: int = 256,
+        min_speech_ms: int = 160,
+        min_silence_ms: int = 320,
+    ) -> None:
         try:
             import numpy as np
             from pipecat.audio.turn.base_turn_analyzer import EndOfTurnState
@@ -41,18 +47,29 @@ class TenPipecatTurnDetector:
             ) from error
         if hop_samples not in {160, 256}:
             raise ValueError("TEN VAD hop size must be 160 or 256 samples at 16 kHz")
+        if min_speech_ms < 0 or min_silence_ms < 0:
+            raise ValueError("TEN VAD debounce durations cannot be negative")
         self._np = np
         self._complete_state = EndOfTurnState.COMPLETE
         self._vad = TenVad(hop_samples, threshold)
         self._hop_samples = hop_samples
+        self._frame_ms = hop_samples / 16
+        self._min_speech_ms = min_speech_ms
+        self._min_silence_ms = min_silence_ms
         self._buffer = bytearray()
         self._speech_active = False
+        self._raw_speech_ms = 0.0
+        self._raw_silence_ms = 0.0
         self._revision = 0
         self._semantic = LocalSmartTurnAnalyzerV3(
             sample_rate=16000,
             cpu_count=1,
             params=SmartTurnParams(max_duration_secs=8),
         )
+        # Pipecat stores the constructor value separately and leaves its
+        # active rate at zero until the pipeline calls this hook. We are using
+        # the analyzer outside a Pipecat pipeline, so initialise it ourselves.
+        self._semantic.set_sample_rate(16000)
 
     @property
     def speech_active(self) -> bool:
@@ -73,12 +90,27 @@ class TenPipecatTurnDetector:
             samples = self._np.frombuffer(frame, dtype=self._np.int16)
             probability, flag = self._vad.process(samples)
             speaking = bool(flag)
-            self._semantic.append_audio(frame, is_speech=speaking)
-            if speaking == self._speech_active:
-                continue
-            self._speech_active = speaking
-            self._revision += 1
-            boundaries.append(TurnBoundary("speech_started" if speaking else "speech_ended", probability))
+            if speaking:
+                self._raw_speech_ms += self._frame_ms
+                self._raw_silence_ms = 0.0
+            else:
+                self._raw_silence_ms += self._frame_ms
+                self._raw_speech_ms = 0.0
+
+            # Feed all sound to the semantic model, but debounce the boolean
+            # given to it so a single 16 ms VAD flicker cannot split a turn.
+            effective_speech = self._speech_active
+            if not self._speech_active and speaking and self._raw_speech_ms >= self._min_speech_ms:
+                self._speech_active = True
+                self._revision += 1
+                effective_speech = True
+                boundaries.append(TurnBoundary("speech_started", probability))
+            elif self._speech_active and not speaking and self._raw_silence_ms >= self._min_silence_ms:
+                self._speech_active = False
+                self._revision += 1
+                effective_speech = False
+                boundaries.append(TurnBoundary("speech_ended", probability))
+            self._semantic.append_audio(frame, is_speech=effective_speech)
         return boundaries
 
     async def analyze_current_pause(self, revision: int) -> SemanticTurnDecision:

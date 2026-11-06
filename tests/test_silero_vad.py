@@ -62,8 +62,13 @@ class TenSmartTurnTests(unittest.IsolatedAsyncioTestCase):
         detector._np = np
         detector._vad = _TenVad()
         detector._hop_samples = 256
+        detector._frame_ms = 16
+        detector._min_speech_ms = 16
+        detector._min_silence_ms = 16
         detector._buffer = bytearray()
         detector._speech_active = False
+        detector._raw_speech_ms = 0.0
+        detector._raw_silence_ms = 0.0
         detector._revision = 0
         detector._semantic = _Semantic()
         detector._complete_state = "complete"
