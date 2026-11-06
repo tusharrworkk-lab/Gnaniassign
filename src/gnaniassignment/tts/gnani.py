@@ -178,6 +178,11 @@ class GnaniRealtimeTts:
                     if event_type not in {"audio", "complete"}:
                         continue
                     data = message.get("data")
+                    # Gnani's terminal `complete` event may legitimately
+                    # contain no audio/data object after the final audio
+                    # frame. Treat it as the normal end of synthesis.
+                    if event_type == "complete" and not isinstance(data, dict):
+                        return
                     if not isinstance(data, dict):
                         raise GnaniTtsError("Gnani TTS audio message has no data object")
                     final = bool(data.get("is_final", False))
