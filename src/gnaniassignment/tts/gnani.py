@@ -108,6 +108,34 @@ class GnaniRealtimeTts:
         self.last_audio_chunks = 0
         self.last_audio_bytes = 0
 
+    async def _open_stream(self) -> None:
+        """Open a fresh provider connection.
+
+        A telephone call can sit silent for minutes between replies.  Gnani's
+        endpoint may close an idle WebSocket in that interval, so this helper
+        is also used by ``synthesize`` to recover before a new request.
+        """
+        if self._connect is not None:
+            self._stream = await self._connect(self.endpoint, self.headers)
+            return
+        try:
+            import websockets
+        except ImportError as error:
+            raise RuntimeError("Install voice WebSocket support with: uv sync --extra gnani-stt") from error
+        header_name = "additional_headers" if "additional_headers" in inspect.signature(websockets.connect).parameters else "extra_headers"
+        self._stream = await websockets.connect(self.endpoint, **{header_name: self.headers})
+
+    async def _reconnect_if_closed(self) -> None:
+        if self._stream is None or bool(getattr(self._stream, "closed", False)):
+            if self._stream is not None:
+                try:
+                    await self._stream.close()
+                except Exception:
+                    # The old connection is already unusable; opening a new
+                    # one is the recovery path.
+                    pass
+            await self._open_stream()
+
     @property
     def headers(self) -> dict[str, str]:
         return {"X-API-Key-ID": self.api_key, "Content-Type": "application/json"}
@@ -134,15 +162,7 @@ class GnaniRealtimeTts:
         }
 
     async def __aenter__(self) -> "GnaniRealtimeTts":
-        if self._connect is not None:
-            self._stream = await self._connect(self.endpoint, self.headers)
-        else:
-            try:
-                import websockets
-            except ImportError as error:
-                raise RuntimeError("Install voice WebSocket support with: uv sync --extra gnani-stt") from error
-            header_name = "additional_headers" if "additional_headers" in inspect.signature(websockets.connect).parameters else "extra_headers"
-            self._stream = await websockets.connect(self.endpoint, **{header_name: self.headers})
+        await self._open_stream()
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
@@ -155,13 +175,24 @@ class GnaniRealtimeTts:
         if self._stream is None:
             raise RuntimeError("Enter GnaniRealtimeTts with 'async with' before synthesis")
         async with self._request_lock:
+            await self._reconnect_if_closed()
             started = time.perf_counter()
             self.last_first_audio_ms = None
             self.last_synthesis_ms = None
             self.last_audio_chunks = 0
             self.last_audio_bytes = 0
             try:
-                await self._stream.send(json.dumps(self.request(text, add_clear_throat=add_clear_throat, latency_giggle=latency_giggle)))
+                request = json.dumps(self.request(text, add_clear_throat=add_clear_throat, latency_giggle=latency_giggle))
+                try:
+                    await self._stream.send(request)
+                except Exception as error:
+                    # A close discovered at send time is the normal symptom of
+                    # an idle provider socket.  No reply audio has been yielded
+                    # yet, so a single reconnect-and-resend cannot duplicate it.
+                    if not type(error).__name__.startswith("ConnectionClosed"):
+                        raise
+                    await self._open_stream()
+                    await self._stream.send(request)
                 while True:
                     raw_message = await self._stream.recv()
                     if isinstance(raw_message, bytes):

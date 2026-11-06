@@ -74,6 +74,8 @@ class VoiceLinkCall:
     vad_speech_active: bool = False
     vad_turn_ended: asyncio.Event = field(default_factory=asyncio.Event)
     semantic_task: asyncio.Task[None] | None = None
+    reply_count: int = 0
+    _active_reply_metrics: dict[str, Any] | None = field(default=None, repr=False)
 
     async def metric(self, **values: Any) -> None:
         values["elapsed_ms"] = round((time.perf_counter() - self.started_at) * 1000, 1)
@@ -103,6 +105,14 @@ class VoiceLinkCall:
     async def _send_outbound_frame(self, alaw: bytes) -> None:
         async with self.send_lock:
             await self.websocket.send_json({"event": "media", "media": {"payload": base64.b64encode(alaw).decode("ascii")}})
+        # This measures that our server handed a frame to the WebSocket.  It
+        # is deliberately *not* labelled "played": VoiceLink's documented
+        # media/mark events do not acknowledge handset playback.
+        if self._active_reply_metrics is not None:
+            now_ms = round((time.perf_counter() - self.started_at) * 1000, 1)
+            self._active_reply_metrics["outbound_frames_sent"] += 1
+            self._active_reply_metrics["outbound_last_frame_sent_ms"] = now_ms
+            self._active_reply_metrics.setdefault("outbound_first_frame_sent_ms", now_ms)
         # Preserve real-time audio cadence; sending a full TTS response as fast
         # as the network allows causes carrier-side jitter/garbling.
         await asyncio.sleep(0.02)
@@ -173,13 +183,41 @@ class VoiceLinkCall:
             self.vad_turn_ended.set()
 
     async def speak_reply(self, text: str) -> None:
-        async for chunk in self.tts.synthesize(text):
-            await self.send_media(chunk.audio)
-        await self.flush_outbound()
-        # This outbound marker is optional for playback, but lets VoiceLink
-        # correlate an agent response boundary using its documented schema.
-        async with self.send_lock:
-            await self.websocket.send_json({"event": "mark", "mark": {"name": "response_done"}})
+        """Synthesize and send one streamed reply with auditable hand-off timing.
+
+        VoiceLink documents outbound media as fire-and-forget.  These values
+        therefore isolate TTS and server-to-VoiceLink hand-off, while making
+        no unsupported claim about when the caller's handset played the audio.
+        """
+        self.reply_count += 1
+        reply_started = time.perf_counter()
+        self._active_reply_metrics = {
+            "reply_index": self.reply_count,
+            "reply_text_characters": len(text),
+            "reply_started_ms": round((reply_started - self.started_at) * 1000, 1),
+            "outbound_frames_sent": 0,
+        }
+        try:
+            async for chunk in self.tts.synthesize(text):
+                if self.tts.last_first_audio_ms is not None:
+                    self._active_reply_metrics.setdefault(
+                        "tts_first_audio_ms",
+                        round((reply_started - self.started_at) * 1000 + self.tts.last_first_audio_ms, 1),
+                    )
+                await self.send_media(chunk.audio)
+            await self.flush_outbound()
+            self._active_reply_metrics["tts_completed_ms"] = round(
+                (reply_started - self.started_at) * 1000 + (self.tts.last_synthesis_ms or 0), 1
+            )
+            # This outbound marker is optional for playback, but lets VoiceLink
+            # correlate an agent response boundary using its documented schema.
+            async with self.send_lock:
+                await self.websocket.send_json({"event": "mark", "mark": {"name": "response_done"}})
+            self._active_reply_metrics["outbound_mark_sent_ms"] = round((time.perf_counter() - self.started_at) * 1000, 1)
+            await self.metric(reply_count=self.reply_count, latest_reply=dict(self._active_reply_metrics))
+            logger.info("voicelink reply handed off: stream=%s metrics=%s", self.stream_sid, self._active_reply_metrics)
+        finally:
+            self._active_reply_metrics = None
 
 
 def _call_context(payload: dict[str, Any]) -> tuple[str, str, str, str]:

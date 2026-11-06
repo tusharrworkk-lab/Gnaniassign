@@ -25,6 +25,8 @@ class TurnState(TypedDict):
     intent: str
     topic: str
     history: list[ChatTurn]
+    prior_call_context: list[ChatTurn]
+    current_call_history: list[ChatTurn]
     working_memory: dict[str, str]
     account_context: str
     memory: str
@@ -64,27 +66,34 @@ def build_graph(
     def classify(state: TurnState) -> dict[str, Any]:
         started = time.perf_counter()
         decision_context = {
-            "recent_conversation": [turn.summary[:320] for turn in state["history"][-2:]],
+            # Immediate call context always accompanies the classifier. Short
+            # follow-ups such as "haan, bhej do" have no lexical overlap with
+            # the preceding message but must resolve against it.
+            "recent_conversation": [turn.summary[:320] for turn in state["current_call_history"][-2:]],
             "current_query": state["text"],
             "conversation_session_id": state["session_id"],
         }
         answers = router.predict(decision_context, QUESTIONS)["answers"]
         intent = select_intent(answers, threshold, tuple(agents))
         topic = topic_from_query(state["text"])
-        if topic == "general" and state["history"] and state["history"][-1].intent == intent:
-            topic = state["history"][-1].topic
+        if topic == "general" and state["current_call_history"] and state["current_call_history"][-1].intent == intent:
+            topic = state["current_call_history"][-1].topic
         working_memory = update_working_memory(state["working_memory"], state["text"], intent, topic)
         call_status = (
             "Call status: This is a continuing call; the caller has already received the greeting."
-            if state["history"]
+            if state["current_call_history"]
             else "Call status: This is the first response of the call."
         )
+        prior_memory = select_memory(state["prior_call_context"], intent, topic, state["text"])
+        # Active conversation turns are compulsory context; past-call context
+        # remains small and relevance-filtered.
+        active_memory = state["current_call_history"][-3:]
         return {
             "answers": answers,
             "intent": intent,
             "topic": topic,
             "working_memory": working_memory,
-            "memory": render_working_memory(working_memory) + "\n\n" + state["account_context"] + "\n\n" + call_status + "\n\n" + render_memory(select_memory(state["history"], intent, topic, state["text"])),
+            "memory": render_working_memory(working_memory) + "\n\n" + state["account_context"] + "\n\n" + call_status + "\n\nCurrent call context:\n" + render_memory(active_memory) + "\n\nRelevant prior-call context:\n" + render_memory(prior_memory),
             "metrics": {"intent_ms": (time.perf_counter() - started) * 1000},
         }
 

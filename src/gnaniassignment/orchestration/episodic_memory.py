@@ -15,6 +15,10 @@ class EpisodicMemoryStore(Protocol):
 
     def append(self, customer_id: str, session_id: str, turn: ChatTurn) -> None: ...
 
+    def load_call_summaries(self, customer_id: str, limit: int) -> list[ChatTurn]: ...
+
+    def append_call_summary(self, customer_id: str, session_id: str, summary: str, intent: str, topic: str) -> None: ...
+
 
 class PostgresEpisodicMemoryStore:
     """PostgreSQL implementation; data retention is managed by the database."""
@@ -48,6 +52,47 @@ class PostgresEpisodicMemoryStore:
             rows = cursor.fetchall()
         return [ChatTurn(*row) for row in reversed(rows)]
 
+    @staticmethod
+    def _ensure_call_summary_schema(cursor) -> None:
+        """Keep raw turn audit data separate from compact live-call context."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS episodic_memory_call_summaries (
+                id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                customer_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                intent TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                occurred_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS episodic_memory_call_summary_customer_recent_idx
+                ON episodic_memory_call_summaries (customer_id, occurred_at DESC, id DESC)
+            """
+        )
+
+    def load_call_summaries(self, customer_id: str, limit: int) -> list[ChatTurn]:
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        with self._connect() as connection, connection.cursor() as cursor:
+            self._ensure_call_summary_schema(cursor)
+            cursor.execute(
+                """
+                SELECT summary, summary, summary, intent, topic
+                FROM episodic_memory_call_summaries
+                WHERE customer_id = %s
+                ORDER BY occurred_at DESC, id DESC
+                LIMIT %s
+                """,
+                (customer_id, limit),
+            )
+            rows = cursor.fetchall()
+        return [ChatTurn(*row) for row in reversed(rows)]
+
     def append(self, customer_id: str, session_id: str, turn: ChatTurn) -> None:
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -57,5 +102,17 @@ class PostgresEpisodicMemoryStore:
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (customer_id, session_id, turn.query, turn.answer, turn.summary, turn.intent, turn.topic),
+            )
+
+    def append_call_summary(self, customer_id: str, session_id: str, summary: str, intent: str, topic: str) -> None:
+        with self._connect() as connection, connection.cursor() as cursor:
+            self._ensure_call_summary_schema(cursor)
+            cursor.execute(
+                """
+                INSERT INTO episodic_memory_call_summaries
+                    (customer_id, session_id, summary, intent, topic)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (customer_id, session_id, summary, intent, topic),
             )
 

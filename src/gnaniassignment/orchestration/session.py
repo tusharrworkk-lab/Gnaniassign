@@ -12,6 +12,8 @@ from gnaniassignment.conversation_analytics import AcilConversationTracer, Conve
 
 
 MAX_HISTORY_TURNS = 100
+MAX_PRIOR_CALL_SUMMARIES = 3
+MAX_CALL_SUMMARY_CHARS = 900
 
 
 class TurnSession:
@@ -21,7 +23,15 @@ class TurnSession:
         self.memory_store = memory_store
         self.customer_id = customer_id
         self.session_id = str(uuid4())
-        self.history: list[ChatTurn] = memory_store.load_recent(customer_id, MAX_HISTORY_TURNS) if memory_store and customer_id else []
+        # Raw turns are retained in PostgreSQL for audit, but never replayed
+        # wholesale to a new call.  A fresh call starts with a few concise,
+        # completed-call summaries only.
+        if memory_store and customer_id:
+            summaries = getattr(memory_store, "load_call_summaries", None)
+            self.prior_call_context = summaries(customer_id, MAX_PRIOR_CALL_SUMMARIES) if summaries else memory_store.load_recent(customer_id, MAX_HISTORY_TURNS)
+        else:
+            self.prior_call_context = []
+        self.history: list[ChatTurn] = list(self.prior_call_context)
         self.working_memory: dict[str, str] = {}
         self.conversation_store = conversation_store
         self.tracer = tracer
@@ -53,7 +63,7 @@ class TurnSession:
         if self.account_context_provider is not None:
             self.account_context = self.account_context_provider(text, self.working_memory)
         config = {"configurable": {"on_answer_chunk": on_chunk}} if on_chunk is not None else None
-        result = self.graph.invoke({"session_id": self.session_id, "text": text, "answers": {}, "intent": "", "topic": "", "history": self.history, "working_memory": self.working_memory, "account_context": self.account_context, "memory": "", "replies": [], "spoken": None, "metrics": {}}, config=config)
+        result = self.graph.invoke({"session_id": self.session_id, "text": text, "answers": {}, "intent": "", "topic": "", "history": self.history, "prior_call_context": self.prior_call_context, "current_call_history": self.call_turns, "working_memory": self.working_memory, "account_context": self.account_context, "memory": "", "replies": [], "spoken": None, "metrics": {}}, config=config)
         self.working_memory = result["working_memory"]
         reply_data = result["replies"][0]
         reply = reply_data["text"]
@@ -83,7 +93,10 @@ class TurnSession:
 
     def finalize_call(self) -> dict[str, object] | None:
         """Persist and judge one complete call after microphone capture has ended."""
-        if self.conversation_store is None or not self.call_turns:
+        if not self.call_turns:
+            return None
+        self._persist_call_summary()
+        if self.conversation_store is None:
             return None
         transcript = [
             {"turn_number": index, "user": turn.query, "assistant": turn.answer, "routed_intent": turn.intent}
@@ -97,6 +110,36 @@ class TurnSession:
         if self.tracer is not None and judge_result is not None:
             self.tracer.emit_call_judgment(self.session_id, judge_result)
         return judge_result
+
+    def _persist_call_summary(self) -> None:
+        """Store a small deterministic hand-off summary for the next call.
+
+        No extra model call is made after the phone call; per-turn summaries
+        already produced by the agent are compacted so finalization cannot add
+        voice latency or background LLM cost.
+        """
+        if self.memory_store is None or self.customer_id is None:
+            return
+        append_summary = getattr(self.memory_store, "append_call_summary", None)
+        if append_summary is None:
+            return
+        lines: list[str] = []
+        seen: set[str] = set()
+        for turn in self.call_turns[-3:]:
+            item = turn.summary.strip()
+            if item and item not in seen:
+                lines.append(item)
+                seen.add(item)
+        if not lines:
+            return
+        summary = "Previous call: " + " ".join(lines)
+        append_summary(
+            self.customer_id,
+            self.session_id,
+            summary[:MAX_CALL_SUMMARY_CHARS],
+            self.call_turns[-1].intent,
+            self.call_turns[-1].topic,
+        )
 
     def ask(self, query: str) -> dict[str, Any]:
         """Convenience entry point for one complete text-chat query."""

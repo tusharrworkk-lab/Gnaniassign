@@ -67,6 +67,46 @@ class Store:
 
 
 class PipelineTests(unittest.TestCase):
+    def test_voicelink_reply_metrics_separate_tts_from_websocket_handoff(self):
+        from gnaniassignment.telephony.voicelink import VoiceLinkCall
+        from gnaniassignment.tts.gnani import GnaniAudioChunk
+
+        class WebSocket:
+            def __init__(self):
+                self.messages = []
+
+            async def send_json(self, message):
+                self.messages.append(message)
+
+        class Tts:
+            sample_rate = 8000
+            last_first_audio_ms = None
+            last_synthesis_ms = None
+
+            async def synthesize(self, text):
+                self.last_first_audio_ms = 7.0
+                yield GnaniAudioChunk(b"\\x00" * 320, 0, True)
+                self.last_synthesis_ms = 9.0
+
+        async def run():
+            socket, metrics = WebSocket(), []
+            call = VoiceLinkCall(socket, "stream-1", "call-1", "caller", "customer", object(), Tts(), object())
+
+            async def record(**values):
+                metrics.append(values)
+
+            call.metric = record
+            await call.speak_reply("Hello")
+            return socket.messages, metrics
+
+        messages, metrics = asyncio.run(run())
+        reply = metrics[-1]["latest_reply"]
+        self.assertEqual(messages[-1], {"event": "mark", "mark": {"name": "response_done"}})
+        self.assertGreater(reply["outbound_frames_sent"], 0)
+        self.assertIn("tts_first_audio_ms", reply)
+        self.assertIn("outbound_first_frame_sent_ms", reply)
+        self.assertIn("outbound_mark_sent_ms", reply)
+
     def test_retail_minilm_switch_uses_configured_fallback(self):
         from unittest.mock import patch
 
@@ -277,6 +317,37 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(request["voice"], "Shivani")
         self.assertEqual(request["language"], "hi-en")
         self.assertEqual(request["audio_config"]["container"], "raw")
+
+    def test_tts_reopens_an_idle_closed_provider_socket_before_a_reply(self):
+        connections = []
+
+        class Socket:
+            def __init__(self, closed=False):
+                self.closed = closed
+                self.sent = []
+                self.messages = ['{"type":"complete"}']
+
+            async def send(self, message):
+                self.sent.append(message)
+
+            async def recv(self):
+                return self.messages.pop(0)
+
+            async def close(self):
+                self.closed = True
+
+        async def connect(endpoint, headers):
+            socket = Socket(closed=not connections)
+            connections.append(socket)
+            return socket
+
+        async def synthesize():
+            async with GnaniRealtimeTts(api_key="test-key", connect=connect) as tts:
+                return [chunk async for chunk in tts.synthesize("Hello")]
+
+        self.assertEqual(asyncio.run(synthesize()), [])
+        self.assertEqual(len(connections), 2)
+        self.assertEqual(len(connections[1].sent), 1)
 
     def test_tts_audio_tags_are_allowlisted_and_v3_only(self):
         spoken = decorate_tts_text("Aapka order ID ORD-1042 hai. <shouting> Dhanyavaad.", enabled=True, model="timbre-v3.0", add_clear_throat=True)
@@ -506,6 +577,31 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(store.saved), 1)
         self.assertEqual(store.saved[0][0], "mock-customer-001")
         self.assertEqual(store.saved[0][2].intent, "user_core")
+
+    def test_new_call_uses_compact_prior_summaries_and_keeps_active_turns(self):
+        class MemoryStore:
+            def __init__(self):
+                self.saved_call_summaries = []
+
+            def load_call_summaries(self, customer_id, limit):
+                self.loaded = (customer_id, limit)
+                return [ChatTurn("old", "old", "Previous call: caller asked about a meeting.", "generic", "general")]
+
+            def append(self, customer_id, session_id, turn):
+                pass
+
+            def append_call_summary(self, customer_id, session_id, summary, intent, topic):
+                self.saved_call_summaries.append((customer_id, summary, intent, topic))
+
+        chat, store = Chat(), MemoryStore()
+        session = TurnSession(build_graph(GenericRouter(), generic_agents(chat)), memory_store=store, customer_id="caller-1")
+        session.ask("Tushar ko kal party ke baare mein bata dena")
+        session.ask("haan, bata do")
+        self.assertEqual(store.loaded, ("caller-1", 3))
+        self.assertIn("Current call context:\nMemory: Coverage: operating region is India.", chat.prompts[-1])
+        session.finalize_call()
+        self.assertEqual(len(store.saved_call_summaries), 1)
+        self.assertIn("Previous call:", store.saved_call_summaries[0][1])
 
     def test_invalid_laya_confidence_is_rejected(self):
         scores = {"intent": {"choice": "user_core", "confidence": float("nan")}}
