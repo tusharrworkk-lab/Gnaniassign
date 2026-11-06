@@ -154,6 +154,58 @@ def _call_context(payload: dict[str, Any]) -> tuple[str, str, str, str]:
     return stream_sid, call_sid, caller_id, str(customer_id or f"caller:{caller_id}")
 
 
+async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, events: Any | None) -> None:
+    """Generate one response without letting a recoverable model failure kill
+    the STT receiver for the rest of the telephone call.
+    """
+    try:
+        await call.metric(stt_final_ms=round((time.perf_counter()-call.started_at)*1000,1), stt_provider_latency_ms=stt_event.latency_ms)
+        if hasattr(call.session, "record_stt_segment"):
+            call.session.record_stt_segment(stt_event.text, stt_event.segment_id, stt_event.latency_ms)
+        if events is not None:
+            await events.publish("transcript.received", session_id=call.stream_sid, customer_id=call.customer_id, text=stt_event.text)
+        chunks: asyncio.Queue[str] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        first_chunk_at: float | None = None
+
+        def on_chunk(chunk: str) -> None:
+            loop.call_soon_threadsafe(chunks.put_nowait, chunk)
+
+        generation = asyncio.create_task(asyncio.to_thread(call.session.ask_stream, stt_event.text, on_chunk))
+        pending = ""
+        while not generation.done() or not chunks.empty():
+            try:
+                chunk = await asyncio.wait_for(chunks.get(), timeout=0.05)
+            except asyncio.TimeoutError:
+                continue
+            if first_chunk_at is None:
+                first_chunk_at = time.perf_counter()
+                await call.metric(llm_ttft_ms=round((first_chunk_at-call.started_at)*1000,1))
+            pending += chunk
+            # Start audio at a natural sentence boundary, or cap the fragment
+            # so a slow model never becomes a voice note.
+            if any(mark in pending for mark in ".!?") or len(pending) >= 90:
+                await call.speak_reply(pending.strip())
+                pending = ""
+        result = await generation
+        if pending.strip():
+            await call.speak_reply(pending.strip())
+        await call.metric(llm_completed_ms=round((time.perf_counter()-call.started_at)*1000,1))
+        if events is not None:
+            await events.publish("agent.responded", session_id=call.stream_sid, intent=result["intent"], text=result["spoken"])
+    except Exception as error:
+        # A model may exhaust its reasoning/output budget. The caller should
+        # hear a retry prompt and the next final STT segment must still work.
+        logger.exception("voicelink turn failed: stream=%s", call.stream_sid)
+        await call.metric(agent_failed=True, agent_error=type(error).__name__)
+        if events is not None:
+            await events.publish("agent.failed", session_id=call.stream_sid, channel="voicelink", message=str(error)[:300])
+        try:
+            await call.speak_reply("Maaf kijiye, main jawab taiyar nahi kar paayi. Kripya ek baar phir se bataiye.")
+        except Exception:
+            logger.exception("voicelink fallback speech failed: stream=%s", call.stream_sid)
+
+
 async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = None) -> None:
     """Serve one documented VoiceLink WebSocket media session."""
     await websocket.accept()
@@ -191,38 +243,7 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                     assert call is not None
                     async for stt_event in call.stt.events():
                         if isinstance(stt_event, VoiceTranscript) and stt_event.text.strip():
-                            await call.metric(stt_final_ms=round((time.perf_counter()-call.started_at)*1000,1), stt_provider_latency_ms=stt_event.latency_ms)
-                            if hasattr(call.session, "record_stt_segment"):
-                                call.session.record_stt_segment(stt_event.text, stt_event.segment_id, stt_event.latency_ms)
-                            if events is not None:
-                                await events.publish("transcript.received", session_id=call.stream_sid, customer_id=call.customer_id, text=stt_event.text)
-                            chunks: asyncio.Queue[str] = asyncio.Queue()
-                            loop = asyncio.get_running_loop()
-                            first_chunk_at: float | None = None
-                            def on_chunk(chunk: str) -> None:
-                                loop.call_soon_threadsafe(chunks.put_nowait, chunk)
-                            generation = asyncio.create_task(asyncio.to_thread(call.session.ask_stream, stt_event.text, on_chunk))
-                            pending = ""
-                            while not generation.done() or not chunks.empty():
-                                try:
-                                    chunk = await asyncio.wait_for(chunks.get(), timeout=0.05)
-                                except asyncio.TimeoutError:
-                                    continue
-                                if first_chunk_at is None:
-                                    first_chunk_at = time.perf_counter()
-                                    await call.metric(llm_ttft_ms=round((first_chunk_at-call.started_at)*1000,1))
-                                pending += chunk
-                                # Start audio at a natural sentence boundary, or cap the
-                                # fragment so a slow model never becomes a voice note.
-                                if any(mark in pending for mark in ".!?") or len(pending) >= 90:
-                                    await call.speak_reply(pending.strip())
-                                    pending = ""
-                            result = await generation
-                            if pending.strip():
-                                await call.speak_reply(pending.strip())
-                            await call.metric(llm_completed_ms=round((time.perf_counter()-call.started_at)*1000,1))
-                            if events is not None:
-                                await events.publish("agent.responded", session_id=call.stream_sid, intent=result["intent"], text=result["spoken"])
+                            await _reply_to_transcript(call, stt_event, events)
                         elif isinstance(stt_event, VoiceError) and events is not None:
                             await events.publish("stt.failed", session_id=call.stream_sid, message=stt_event.message[:300])
 
