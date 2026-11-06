@@ -127,9 +127,10 @@ VOICE_LINK_TEN_VAD_HOP_SAMPLES=256
 VOICE_LINK_TURN_DETECTION_MODE=endpoint
 ```
 
-`silero` remains available as a legacy detector through
-`VOICE_LINK_TURN_DETECTOR=silero`, but the recommended production backend is
-`ten_pipecat`.
+`silero` remains available for local experiments through
+`VOICE_LINK_TURN_DETECTOR=silero` when its optional extra is installed. The
+production image intentionally ships only the recommended `ten_pipecat`
+backend, avoiding the much larger Torch runtime.
 
 ### Gnani realtime TTS
 
