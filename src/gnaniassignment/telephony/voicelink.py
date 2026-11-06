@@ -12,6 +12,7 @@ import audioop
 import base64
 import binascii
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -26,6 +27,7 @@ from gnaniassignment.voice.events import VoiceError, VoiceTranscript
 
 VOICE_LINK_SAMPLE_RATE = 8000
 PCM_WIDTH = 2
+logger = logging.getLogger(__name__)
 
 
 def _decode_alaw(payload: str) -> bytes:
@@ -58,6 +60,7 @@ class VoiceLinkCall:
     output_resample_state: Any = None
     pcm_buffer: bytearray = field(default_factory=bytearray)
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    inbound_packets: int = 0
 
     async def send_media(self, pcm: bytes) -> None:
         """Resample linear TTS PCM and send the documented outbound frame."""
@@ -78,6 +81,9 @@ class VoiceLinkCall:
 
     async def feed_media(self, payload: str) -> None:
         """Decode, resample, and frame inbound VoiceLink audio for Gnani."""
+        self.inbound_packets += 1
+        if self.inbound_packets == 1 or self.inbound_packets % 100 == 0:
+            logger.info("voicelink inbound media: stream=%s packets=%d", self.stream_sid, self.inbound_packets)
         pcm_8k = _decode_alaw(payload)
         pcm_16k, self.input_resample_state = audioop.ratecv(
             pcm_8k,
@@ -135,6 +141,7 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
             if not isinstance(event, dict):
                 continue
             event_name = event.get("event")
+            logger.info("voicelink event received: event=%s stream=%s", event_name, call.stream_sid if call else event.get("stream_sid", "pending"))
             if event_name == "connected":
                 continue
             if event_name == "start":
@@ -145,6 +152,7 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                 await stt.__aenter__()
                 await tts.__aenter__()
                 call = VoiceLinkCall(websocket, stream_sid, call_sid, caller_id, customer_id, stt, tts, create_session(customer_id=customer_id))
+                logger.info("voicelink call started: stream=%s call=%s", stream_sid, call_sid)
                 if events is not None:
                     await events.publish("call.started", session_id=stream_sid, caller_id=caller_id, call_id=call_sid, channel="voicelink")
 
@@ -171,8 +179,10 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                     await call.feed_media(media["payload"])
                 continue
             if event_name == "stop":
+                logger.info("voicelink call stop: stream=%s packets=%d", call.stream_sid if call else "unknown", call.inbound_packets if call else 0)
                 break
     except Exception as error:
+        logger.exception("voicelink call failed: stream=%s", call.stream_sid if call else "unknown")
         if events is not None:
             await events.publish("call.failed", session_id=call.stream_sid if call else None, channel="voicelink", message=str(error)[:300])
         raise
