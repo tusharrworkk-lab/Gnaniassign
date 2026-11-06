@@ -29,6 +29,7 @@ from gnaniassignment.telephony.latency import CallLatencyStore
 
 VOICE_LINK_SAMPLE_RATE = 8000
 PCM_WIDTH = 2
+VOICE_LINK_FRAME_BYTES = 160  # 20 ms: 8000 samples/s × 20 ms × 8-bit A-law
 logger = logging.getLogger(__name__)
 
 
@@ -63,6 +64,7 @@ class VoiceLinkCall:
     pcm_buffer: bytearray = field(default_factory=bytearray)
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     inbound_packets: int = 0
+    outbound_buffer: bytearray = field(default_factory=bytearray)
     started_at: float = field(default_factory=time.perf_counter)
     latency_store: CallLatencyStore | None = None
 
@@ -85,8 +87,24 @@ class VoiceLinkCall:
         )
         if not converted:
             return
+        self.outbound_buffer.extend(audioop.lin2alaw(converted, PCM_WIDTH))
+        while len(self.outbound_buffer) >= VOICE_LINK_FRAME_BYTES:
+            frame = bytes(self.outbound_buffer[:VOICE_LINK_FRAME_BYTES])
+            del self.outbound_buffer[:VOICE_LINK_FRAME_BYTES]
+            await self._send_outbound_frame(frame)
+
+    async def _send_outbound_frame(self, alaw: bytes) -> None:
         async with self.send_lock:
-            await self.websocket.send_json({"event": "media", "media": {"payload": _encode_alaw(converted)}})
+            await self.websocket.send_json({"event": "media", "media": {"payload": base64.b64encode(alaw).decode("ascii")}})
+        # Preserve real-time audio cadence; sending a full TTS response as fast
+        # as the network allows causes carrier-side jitter/garbling.
+        await asyncio.sleep(0.02)
+
+    async def flush_outbound(self) -> None:
+        if self.outbound_buffer:
+            frame = bytes(self.outbound_buffer)
+            self.outbound_buffer.clear()
+            await self._send_outbound_frame(frame)
 
     async def feed_media(self, payload: str) -> None:
         """Decode, resample, and frame inbound VoiceLink audio for Gnani."""
@@ -112,6 +130,7 @@ class VoiceLinkCall:
     async def speak_reply(self, text: str) -> None:
         async for chunk in self.tts.synthesize(text):
             await self.send_media(chunk.audio)
+        await self.flush_outbound()
         # This outbound marker is optional for playback, but lets VoiceLink
         # correlate an agent response boundary using its documented schema.
         async with self.send_lock:
