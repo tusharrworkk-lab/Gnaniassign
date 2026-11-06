@@ -68,6 +68,26 @@ uv sync --extra gnani-stt
 
 Set `GNANI_API_KEY` in `.env`. The configured pipeline is `en-IN` at `16000` Hz: signed-16-bit little-endian mono PCM, exactly 1,024 bytes every 32 ms. The raw WebSocket adapter sends `x-vad-*` headers, which the official Python SDK does not expose. `GNANI_MIN_SILENCE_MS=150` balances fast final segments with fewer splits at natural pauses; raise it to `200`–`300` if callers are still split. Do not burst buffered frames.
 
+### Test the hosted VoiceLink media endpoint locally
+
+Use the local simulator to make your computer act like a VoiceLink media
+stream while retaining the deployed cloud API, LLM, STT, and TTS stack. It
+captures an ALSA microphone, sends 8 kHz A-law frames to the hosted WSS
+endpoint, and plays returned agent audio through ALSA.
+
+```bash
+export VOICELINK_WS_TOKEN='your-hosted-token'
+uv run python -m gnaniassignment.pipeline.voicelink_ws_simulator \
+  --input-device default \
+  --playback-device default \
+  --customer-id local-voicelink-test
+```
+
+The default endpoint is `wss://voice.sidecut.me/v1/media/voicelink`. Use
+`arecord -L` and `aplay -L` to choose non-default ALSA devices. Press Ctrl+C
+to end the simulated call. This tool tests the hosted WebSocket adapter; it
+does not contact VoiceLink or place a real phone call.
+
 ### Gnani realtime TTS
 
 The TTS adapter uses Timbre v3 (`Shivani`) with `hi-en` and streams 24 kHz raw PCM—no audio file is created. Speak a Roman-Hinglish answer through the default ALSA output with:
