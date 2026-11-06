@@ -7,6 +7,7 @@ import unittest
 import numpy as np
 
 from gnaniassignment.voice.silero_vad import SileroVad
+from gnaniassignment.voice.ten_smart_turn import TenPipecatTurnDetector
 
 
 class _Events:
@@ -34,4 +35,44 @@ class SileroVadTests(unittest.TestCase):
 
         self.assertEqual([item.kind for item in boundaries], ["speech_started", "speech_ended"])
         self.assertEqual([item.sample_offset for item in boundaries], [128, 384])
+
+
+class _TenVad:
+    def __init__(self) -> None:
+        self.results = iter(((0.9, 1), (0.1, 0)))
+
+    def process(self, _samples):
+        return next(self.results)
+
+
+class _Semantic:
+    def __init__(self) -> None:
+        self.frames = []
+
+    def append_audio(self, frame, is_speech):
+        self.frames.append((frame, is_speech))
+
+    async def analyze_end_of_turn(self):
+        return "complete", type("Metrics", (), {"probability": 0.88})()
+
+
+class TenSmartTurnTests(unittest.IsolatedAsyncioTestCase):
+    async def test_acoustic_boundaries_and_semantic_completion_are_separate(self) -> None:
+        detector = object.__new__(TenPipecatTurnDetector)
+        detector._np = np
+        detector._vad = _TenVad()
+        detector._hop_samples = 256
+        detector._buffer = bytearray()
+        detector._speech_active = False
+        detector._revision = 0
+        detector._semantic = _Semantic()
+        detector._complete_state = "complete"
+
+        events = detector.feed_pcm_s16le(b"\x00\x00" * 512)
+        self.assertEqual([event.kind for event in events], ["speech_started", "speech_ended"])
+        self.assertEqual(detector.revision, 2)
+
+        result = await detector.analyze_current_pause(detector.revision)
+        self.assertTrue(result.complete)
+        self.assertEqual(result.probability, 0.88)
 

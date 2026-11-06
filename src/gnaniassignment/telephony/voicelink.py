@@ -70,8 +70,10 @@ class VoiceLinkCall:
     reply_in_progress: bool = False
     vad: Any | None = None
     vad_mode: str = "off"
+    vad_backend: str = "off"
     vad_speech_active: bool = False
     vad_turn_ended: asyncio.Event = field(default_factory=asyncio.Event)
+    semantic_task: asyncio.Task[None] | None = None
 
     async def metric(self, **values: Any) -> None:
         values["elapsed_ms"] = round((time.perf_counter() - self.started_at) * 1000, 1)
@@ -118,16 +120,6 @@ class VoiceLinkCall:
         if self.inbound_packets == 1 or self.inbound_packets % 100 == 0:
             logger.info("voicelink inbound media: stream=%s packets=%d", self.stream_sid, self.inbound_packets)
         pcm_8k = _decode_alaw(payload)
-        boundaries: list[Any] = []
-        if self.vad is not None:
-            boundaries = self.vad.feed_pcm_s16le(pcm_8k)
-            for boundary in boundaries:
-                if boundary.kind == "speech_started":
-                    self.vad_speech_active = True
-                    self.vad_turn_ended.clear()
-                elif boundary.kind == "speech_ended":
-                    self.vad_speech_active = False
-                    self.vad_turn_ended.set()
         pcm_16k, self.input_resample_state = audioop.ratecv(
             pcm_8k,
             PCM_WIDTH,
@@ -136,12 +128,49 @@ class VoiceLinkCall:
             self.stt.sample_rate,
             self.input_resample_state,
         )
+        boundaries: list[Any] = []
+        if self.vad is not None:
+            # Both optional detectors consume the exact 16 kHz PCM stream
+            # sent to STT. TEN requires it; Silero also supports it.
+            boundaries = self.vad.feed_pcm_s16le(pcm_16k)
+            for boundary in boundaries:
+                if boundary.kind == "speech_started":
+                    self.vad_speech_active = True
+                    self.vad_turn_ended.clear()
+                elif boundary.kind == "speech_ended":
+                    self.vad_speech_active = False
+                    # TEN's acoustic pause is only a trigger for semantic
+                    # analysis. It is not yet permission to commit a turn.
+                    if self.vad_backend != "ten_pipecat":
+                        self.vad_turn_ended.set()
         self.pcm_buffer.extend(pcm_16k)
         while len(self.pcm_buffer) >= self.stt.frame_bytes:
             frame = bytes(self.pcm_buffer[:self.stt.frame_bytes])
             del self.pcm_buffer[:self.stt.frame_bytes]
             await self.stt.send_pcm(frame)
         return boundaries
+
+    async def evaluate_semantic_pause(self, events: Any | None) -> None:
+        """Let Smart Turn decide whether a TEN-detected pause ends the turn."""
+        detector = self.vad
+        if detector is None or not hasattr(detector, "analyze_current_pause"):
+            return
+        decision = await detector.analyze_current_pause(detector.revision)
+        if decision.stale:
+            return
+        await self.metric(
+            smart_turn_complete=decision.complete,
+            smart_turn_probability=decision.probability,
+        )
+        if events is not None:
+            await events.publish(
+                "smart_turn.complete" if decision.complete else "smart_turn.incomplete",
+                session_id=self.stream_sid,
+                channel="voicelink",
+                probability=decision.probability,
+            )
+        if decision.complete:
+            self.vad_turn_ended.set()
 
     async def speak_reply(self, text: str) -> None:
         async for chunk in self.tts.synthesize(text):
@@ -250,17 +279,33 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                 await stt.__aenter__()
                 await tts.__aenter__()
                 call = VoiceLinkCall(websocket, stream_sid, call_sid, caller_id, customer_id, stt, tts, create_session(customer_id=customer_id))
-                vad_mode = os.getenv("VOICE_LINK_SILERO_VAD_MODE", "off").lower()
+                # New generic settings supersede the legacy Silero-only
+                # switch. Keeping that switch preserves existing deployments.
+                vad_mode = os.getenv(
+                    "VOICE_LINK_TURN_DETECTION_MODE",
+                    os.getenv("VOICE_LINK_SILERO_VAD_MODE", "off"),
+                ).lower()
                 if vad_mode not in {"off", "shadow", "endpoint"}:
-                    raise ValueError("VOICE_LINK_SILERO_VAD_MODE must be off, shadow, or endpoint")
+                    raise ValueError("VOICE_LINK_TURN_DETECTION_MODE must be off, shadow, or endpoint")
                 if vad_mode != "off":
-                    from gnaniassignment.voice.silero_vad import SileroVad
-                    call.vad = SileroVad(
-                        VOICE_LINK_SAMPLE_RATE,
-                        threshold=float(os.getenv("VOICE_LINK_SILERO_VAD_THRESHOLD", "0.55")),
-                        min_silence_ms=int(os.getenv("VOICE_LINK_SILERO_VAD_MIN_SILENCE_MS", "350")),
-                    )
+                    backend = os.getenv("VOICE_LINK_TURN_DETECTOR", "ten_pipecat").lower()
+                    if backend == "ten_pipecat":
+                        from gnaniassignment.voice.ten_smart_turn import TenPipecatTurnDetector
+                        call.vad = TenPipecatTurnDetector(
+                            threshold=float(os.getenv("VOICE_LINK_TEN_VAD_THRESHOLD", "0.5")),
+                            hop_samples=int(os.getenv("VOICE_LINK_TEN_VAD_HOP_SAMPLES", "256")),
+                        )
+                    elif backend == "silero":
+                        from gnaniassignment.voice.silero_vad import SileroVad
+                        call.vad = SileroVad(
+                            call.stt.sample_rate,
+                            threshold=float(os.getenv("VOICE_LINK_SILERO_VAD_THRESHOLD", "0.55")),
+                            min_silence_ms=int(os.getenv("VOICE_LINK_SILERO_VAD_MIN_SILENCE_MS", "350")),
+                        )
+                    else:
+                        raise ValueError("VOICE_LINK_TURN_DETECTOR must be ten_pipecat or silero")
                     call.vad_mode = vad_mode
+                    call.vad_backend = backend
                 call.latency_store = CallLatencyStore() if os.getenv("CALL_LATENCY_METRICS_ENABLED", "true").lower() == "true" else None
                 await call.metric(call_started=True)
                 logger.info("voicelink call started: stream=%s call=%s", stream_sid, call_sid)
@@ -280,18 +325,36 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                         first = await turns.get()
                         segments = [first]
                         while True:
-                            # In endpoint mode, Silero's actual acoustic
-                            # speech-end signal lets a complete utterance
-                            # commit with a short grace window. While the
-                            # caller is still speaking, retain the safer
-                            # fragment coalescing window.
+                            # Wait for either a new STT segment or an endpoint
+                            # decision. Smart Turn's result must wake this
+                            # worker; otherwise a semantic completion would
+                            # still pay the legacy coalescing timeout.
                             wait_seconds = coalesce_ms / 1000
-                            if call.vad_mode == "endpoint" and call.vad_turn_ended.is_set() and not call.vad_speech_active:
-                                wait_seconds = float(os.getenv("VOICE_LINK_VAD_ENDPOINT_GRACE_MS", "250")) / 1000
-                            try:
-                                segments.append(await asyncio.wait_for(turns.get(), timeout=wait_seconds))
-                            except asyncio.TimeoutError:
+                            get_segment = asyncio.create_task(turns.get())
+                            endpoint_wait: asyncio.Task[bool] | None = None
+                            waiters: set[asyncio.Task[Any]] = {get_segment}
+                            if call.vad_mode == "endpoint":
+                                endpoint_wait = asyncio.create_task(call.vad_turn_ended.wait())
+                                waiters.add(endpoint_wait)
+                            done, pending = await asyncio.wait(
+                                waiters,
+                                timeout=wait_seconds,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            for waiter in pending:
+                                waiter.cancel()
+                            if not done:
                                 break
+                            if get_segment in done:
+                                segments.append(get_segment.result())
+                                continue
+                            # A semantic completion gets a tiny grace window
+                            # for any STT final already in flight, then commits.
+                            try:
+                                segments.append(await asyncio.wait_for(turns.get(), timeout=float(os.getenv("VOICE_LINK_VAD_ENDPOINT_GRACE_MS", "250")) / 1000))
+                            except asyncio.TimeoutError:
+                                pass
+                            break
                         combined = VoiceTranscript(
                             text=" ".join(segment.text.strip() for segment in segments if segment.text.strip()),
                             segment_id=segments[-1].segment_id,
@@ -328,9 +391,13 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                 if isinstance(media, dict) and media.get("track") == "inbound" and isinstance(media.get("payload"), str):
                     boundaries = await call.feed_media(media["payload"])
                     for boundary in boundaries:
-                        await call.metric(silero_vad_event=boundary.kind)
+                        await call.metric(turn_detector_event=boundary.kind, turn_detector=call.vad_backend)
                         if events is not None:
-                            await events.publish("vad." + boundary.kind, session_id=call.stream_sid, channel="voicelink", mode=call.vad_mode)
+                            await events.publish("vad." + boundary.kind, session_id=call.stream_sid, channel="voicelink", mode=call.vad_mode, detector=call.vad_backend)
+                        if boundary.kind == "speech_ended" and call.vad_backend == "ten_pipecat":
+                            if call.semantic_task is not None and not call.semantic_task.done():
+                                call.semantic_task.cancel()
+                            call.semantic_task = asyncio.create_task(call.evaluate_semantic_pause(events))
                 continue
             if event_name == "stop":
                 logger.info("voicelink call stop: stream=%s packets=%d", call.stream_sid if call else "unknown", call.inbound_packets if call else 0)
@@ -354,6 +421,14 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
             except asyncio.CancelledError:
                 pass
         if call is not None:
+            if call.semantic_task is not None:
+                call.semantic_task.cancel()
+                try:
+                    await call.semantic_task
+                except asyncio.CancelledError:
+                    pass
+            if call.vad is not None and hasattr(call.vad, "close"):
+                await call.vad.close()
             if hasattr(call.session, "finalize_call"):
                 await asyncio.to_thread(call.session.finalize_call)
             await call.metric(call_ended=True, inbound_packets=call.inbound_packets)

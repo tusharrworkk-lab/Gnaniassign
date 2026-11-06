@@ -34,7 +34,7 @@ jobs:
           docker image prune --all --force
       - uses: astral-sh/setup-uv@v5
       - name: Install test dependencies
-        run: uv sync --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt --extra silero-vad
+        run: uv sync --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt --extra silero-vad --extra turn-detection
       - name: Run tests
         run: uv run python -m unittest discover -s tests -p 'test_*.py'
 

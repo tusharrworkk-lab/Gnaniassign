@@ -107,6 +107,30 @@ The image includes the ONNX CPU runtime. Begin in `shadow` mode. Inspect
 `vad.speech_started` and `vad.speech_ended` events against STT segments before
 enabling `endpoint` mode.
 
+### Recommended: TEN VAD + Pipecat Smart Turn
+
+For natural telephone turn-taking, use the two-stage detector below instead
+of a silence timer. TEN VAD evaluates 16 kHz audio in 16 ms hops. A detected
+pause starts Pipecat Smart Turn v3, which sees up to the most recent eight
+seconds of the caller's current audio and decides whether their thought is
+complete. An incomplete result remains in the same turn and waits for more
+speech; it is never sent to the LLM as a fragment.
+
+```dotenv
+# Observe first; `shadow` never changes the existing turn-commit behaviour.
+VOICE_LINK_TURN_DETECTION_MODE=shadow
+VOICE_LINK_TURN_DETECTOR=ten_pipecat
+VOICE_LINK_TEN_VAD_THRESHOLD=0.5
+VOICE_LINK_TEN_VAD_HOP_SAMPLES=256
+
+# After reviewing smart_turn.complete / smart_turn.incomplete telemetry:
+VOICE_LINK_TURN_DETECTION_MODE=endpoint
+```
+
+`silero` remains available as a legacy detector through
+`VOICE_LINK_TURN_DETECTOR=silero`, but the recommended production backend is
+`ten_pipecat`.
+
 ### Gnani realtime TTS
 
 The TTS adapter uses Timbre v3 (`Shivani`) with `hi-en` and streams 24 kHz raw PCM—no audio file is created. Speak a Roman-Hinglish answer through the default ALSA output with:

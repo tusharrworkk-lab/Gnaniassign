@@ -9,13 +9,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y libc++1 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev --no-install-project \
-    --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt --extra silero-vad
+    --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt --extra silero-vad --extra turn-detection
 
 COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable \
-    --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt --extra silero-vad
+    --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt --extra silero-vad --extra turn-detection
 
 ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8080
