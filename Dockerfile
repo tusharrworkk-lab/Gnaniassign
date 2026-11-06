@@ -11,11 +11,11 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev --no-install-project \
-    --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt
+    --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt --extra silero-vad
 
 COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable \
-    --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt
+    --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt --extra silero-vad
 
 ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8080

@@ -29,6 +29,7 @@ bedrock = ["boto3"]
 postgres-memory = ["psycopg[binary]>=3.2"]
 redis-cache = ["redis>=5"]
 api = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
+silero-vad = ["silero-vad[onnx-cpu]>=6.2.3"]
 
 [project.scripts]
 gnaniassignment = "gnaniassignment:main"

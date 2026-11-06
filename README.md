@@ -88,6 +88,25 @@ The default endpoint is `wss://voice.sidecut.me/v1/media/voicelink`. Use
 to end the simulated call. This tool tests the hosted WebSocket adapter; it
 does not contact VoiceLink or place a real phone call.
 
+### Silero VAD endpointing for VoiceLink
+
+Silero VAD is an optional acoustic boundary detector for the VoiceLink 8 kHz
+audio stream. It complements Gnani STT; it never replaces transcription or
+decides the conversational response.
+
+```dotenv
+# Safe rollout: observe boundaries in dashboard events and call metrics only.
+VOICE_LINK_SILERO_VAD_MODE=shadow
+
+# After comparing real-call boundaries, let a detected end-of-speech use a
+# 250 ms grace window rather than the normal fragment coalescing delay.
+VOICE_LINK_SILERO_VAD_MODE=endpoint
+```
+
+The image includes the ONNX CPU runtime. Begin in `shadow` mode. Inspect
+`vad.speech_started` and `vad.speech_ended` events against STT segments before
+enabling `endpoint` mode.
+
 ### Gnani realtime TTS
 
 The TTS adapter uses Timbre v3 (`Shivani`) with `hi-en` and streams 24 kHz raw PCM—no audio file is created. Speak a Roman-Hinglish answer through the default ALSA output with:

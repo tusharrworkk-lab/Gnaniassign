@@ -29,6 +29,7 @@ def _event(name: str, **payload: object) -> str:
 async def run(url: str, token: str, input_device: str, playback_device: str, customer_id: str, seconds: int | None) -> None:
     try:
         import websockets
+        from websockets.exceptions import ConnectionClosed
     except ImportError as error:
         raise RuntimeError("Install WebSocket support with: uv sync --extra gnani-stt") from error
 
@@ -49,6 +50,8 @@ async def run(url: str, token: str, input_device: str, playback_device: str, cus
         raise RuntimeError("Could not open local audio pipes")
 
     print(f"connecting to hosted VoiceLink adapter as {stream_sid}", flush=True)
+    input_enabled = asyncio.Event()
+    input_enabled.set()
     try:
         async with websockets.connect(connect_url, max_size=None) as websocket:
             await websocket.send(_event("connected"))
@@ -75,8 +78,15 @@ async def run(url: str, token: str, input_device: str, playback_device: str, cus
                     while len(buffer) >= PCM_FRAME_BYTES:
                         pcm = bytes(buffer[:PCM_FRAME_BYTES])
                         del buffer[:PCM_FRAME_BYTES]
+                        # A laptop microphone otherwise hears its own speaker
+                        # playback and creates a synthetic caller/agent loop.
+                        if not input_enabled.is_set():
+                            continue
                         alaw = audioop.lin2alaw(pcm, 2)
-                        await websocket.send(_event("media", sequence_number=sequence, media={"track": "inbound", "payload": base64.b64encode(alaw).decode("ascii")}))
+                        try:
+                            await websocket.send(_event("media", sequence_number=sequence, media={"track": "inbound", "payload": base64.b64encode(alaw).decode("ascii")}))
+                        except ConnectionClosed:
+                            return
                         sequence += 1
                         # Match VoiceLink's real 20 ms media cadence rather
                         # than flooding the cloud STT socket.
@@ -90,6 +100,10 @@ async def run(url: str, token: str, input_device: str, playback_device: str, cus
                         continue
                     if message.get("event") == "mark":
                         print("agent response completed", flush=True)
+                        # Keep suppressing capture briefly while the local
+                        # speaker's final buffer drains.
+                        await asyncio.sleep(0.5)
+                        input_enabled.set()
                         continue
                     media = message.get("media")
                     payload = media.get("payload") if isinstance(media, dict) else None
@@ -99,6 +113,7 @@ async def run(url: str, token: str, input_device: str, playback_device: str, cus
                         pcm = audioop.alaw2lin(base64.b64decode(payload, validate=True), 2)
                     except (ValueError, TypeError):
                         continue
+                    input_enabled.clear()
                     playback.stdin.write(pcm)
                     await playback.stdin.drain()
 
@@ -117,7 +132,8 @@ async def run(url: str, token: str, input_device: str, playback_device: str, cus
                     await task
             for task in done:
                 task.result()
-            await websocket.send(_event("stop", stop={"callSid": call_sid}))
+            with suppress(ConnectionClosed):
+                await websocket.send(_event("stop", stop={"callSid": call_sid}))
     finally:
         for process in (capture, playback):
             if process.returncode is None:
