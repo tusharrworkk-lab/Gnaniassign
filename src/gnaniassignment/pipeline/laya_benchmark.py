@@ -20,19 +20,25 @@ def _synchronize_if_cuda(router: LocalLayaRouter) -> None:
 
 def _same_execution_device(router_device: object, parameter_device: object) -> bool:
     """Treat CUDA's implicit default device and cuda:0 as equivalent."""
-    import torch
+    def parse(device: object) -> tuple[str, int | None]:
+        raw = str(device).strip().lower()
+        device_type, separator, ordinal = raw.partition(":")
+        if not separator or not ordinal:
+            return device_type, None
+        try:
+            return device_type, int(ordinal)
+        except ValueError:
+            return device_type, None
 
-    router_torch_device = torch.device(router_device)
-    parameter_torch_device = torch.device(parameter_device)
-    if router_torch_device.type != parameter_torch_device.type:
+    router_type, router_index = parse(router_device)
+    parameter_type, parameter_index = parse(parameter_device)
+    if router_type != parameter_type:
         return False
-    if router_torch_device.type != "cuda":
-        return router_torch_device == parameter_torch_device
+    if router_type != "cuda":
+        return str(router_device).strip().lower() == str(parameter_device).strip().lower()
     # This app selects the default CUDA device (cuda) or an explicit ordinal.
     # `cuda` resolves to cuda:0 unless the caller deliberately set an ordinal.
-    router_index = router_torch_device.index if router_torch_device.index is not None else 0
-    parameter_index = parameter_torch_device.index if parameter_torch_device.index is not None else 0
-    return router_index == parameter_index
+    return (router_index if router_index is not None else 0) == (parameter_index if parameter_index is not None else 0)
 
 
 def main() -> None:
