@@ -67,6 +67,7 @@ class VoiceLinkCall:
     outbound_buffer: bytearray = field(default_factory=bytearray)
     started_at: float = field(default_factory=time.perf_counter)
     latency_store: CallLatencyStore | None = None
+    reply_in_progress: bool = False
 
     async def metric(self, **values: Any) -> None:
         values["elapsed_ms"] = round((time.perf_counter() - self.started_at) * 1000, 1)
@@ -211,6 +212,7 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
     await websocket.accept()
     call: VoiceLinkCall | None = None
     receiver: asyncio.Task[None] | None = None
+    turn_worker: asyncio.Task[None] | None = None
     try:
         while True:
             raw = await websocket.receive_text()
@@ -239,14 +241,52 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                 if events is not None:
                     await events.publish("call.started", session_id=stream_sid, caller_id=caller_id, call_id=call_sid, channel="voicelink")
 
+                # A telephone speaker naturally pauses inside one sentence.
+                # Gnani can deliver each pause as a final transcript, so route
+                # a short cluster as one user turn instead of asking the LLM
+                # to respond to every fragment.
+                coalesce_ms = max(250, min(int(os.getenv("VOICELINK_TURN_COALESCE_MS", "1100")), 3000))
+                turns: asyncio.Queue[VoiceTranscript] = asyncio.Queue()
+
+                async def process_turns() -> None:
+                    assert call is not None
+                    while True:
+                        first = await turns.get()
+                        segments = [first]
+                        while True:
+                            try:
+                                segments.append(await asyncio.wait_for(turns.get(), timeout=coalesce_ms / 1000))
+                            except asyncio.TimeoutError:
+                                break
+                        combined = VoiceTranscript(
+                            text=" ".join(segment.text.strip() for segment in segments if segment.text.strip()),
+                            segment_id=segments[-1].segment_id,
+                            segment_index=segments[-1].segment_index,
+                            audio_duration_ms=sum(segment.audio_duration_ms or 0 for segment in segments) or None,
+                            latency_ms=segments[-1].latency_ms,
+                        )
+                        if not combined.text:
+                            continue
+                        call.reply_in_progress = True
+                        try:
+                            await _reply_to_transcript(call, combined, events)
+                        finally:
+                            call.reply_in_progress = False
+
                 async def receive_stt() -> None:
                     assert call is not None
                     async for stt_event in call.stt.events():
                         if isinstance(stt_event, VoiceTranscript) and stt_event.text.strip():
-                            await _reply_to_transcript(call, stt_event, events)
+                            if call.reply_in_progress:
+                                logger.info("voicelink transcript discarded while replying: stream=%s", call.stream_sid)
+                                if events is not None:
+                                    await events.publish("transcript.discarded", session_id=call.stream_sid, channel="voicelink", reason="agent_reply_in_progress")
+                                continue
+                            await turns.put(stt_event)
                         elif isinstance(stt_event, VoiceError) and events is not None:
                             await events.publish("stt.failed", session_id=call.stream_sid, message=stt_event.message[:300])
 
+                turn_worker = asyncio.create_task(process_turns())
                 receiver = asyncio.create_task(receive_stt())
                 continue
             if event_name == "media" and call is not None:
@@ -267,6 +307,12 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
             receiver.cancel()
             try:
                 await receiver
+            except asyncio.CancelledError:
+                pass
+        if turn_worker is not None:
+            turn_worker.cancel()
+            try:
+                await turn_worker
             except asyncio.CancelledError:
                 pass
         if call is not None:
