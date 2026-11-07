@@ -34,6 +34,7 @@ turn-detection = [
     "pipecat-ai>=0.0.106",
     "ten-vad==1.0.6.8",
 ]
+audio-enhancement = ["pywebrtc-audio>=0.2.0", "numpy>=1.26"]
 test = ["numpy>=1.26"]
 
 [project.scripts]

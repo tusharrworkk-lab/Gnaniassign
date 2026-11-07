@@ -299,6 +299,7 @@ function runtimeEventTitle(event) {
     "call.started": "Call opened",
     "call.ended": "Call closed",
     "media.inbound_started": "Audio stream started",
+    "audio.enhancement": "Inbound noise suppression",
     "transcript.partial": "STT hypothesis",
     "transcript.final": "STT final transcript",
     "transcript.committed": "Turn committed",
@@ -332,6 +333,7 @@ function runtimeEventDetail(event) {
   if (event.kind === "llm.first_token") return `${Math.round(event.ttft_ms || 0)} ms after generation began.`;
   if (event.kind === "tts.first_audio") return `${Math.round(event.tts_ttfa_ms || 0)} ms to first audio from TTS.`;
   if (event.kind === "tts.completed") return `${event.frames || 0} audio frames handed to VoiceLink.`;
+  if (event.kind === "audio.enhancement") return `${event.mode} · input ${event.input_rms_dbfs} dBFS → output ${event.output_rms_dbfs} dBFS · ${event.processing_ms} ms.`;
   return event.session_id ? `Session ${event.session_id}` : "Runtime event";
 }
 

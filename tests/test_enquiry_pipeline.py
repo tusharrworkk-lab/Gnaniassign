@@ -107,6 +107,42 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("outbound_first_frame_sent_ms", reply)
         self.assertIn("outbound_mark_sent_ms", reply)
 
+    def test_voicelink_retries_tts_when_provider_completes_with_no_audio(self):
+        from gnaniassignment.telephony.voicelink import VoiceLinkCall
+        from gnaniassignment.tts.gnani import GnaniAudioChunk
+
+        class WebSocket:
+            def __init__(self): self.messages = []
+            async def send_json(self, message): self.messages.append(message)
+
+        class Tts:
+            sample_rate = 8000
+            last_first_audio_ms = None
+            last_synthesis_ms = None
+
+            def __init__(self): self.calls = self.reopens = 0
+            async def synthesize(self, text):
+                self.calls += 1
+                if self.calls == 1:
+                    self.last_synthesis_ms = 1.0
+                    return
+                self.last_first_audio_ms = 2.0
+                yield GnaniAudioChunk(b"\x00" * 320, 0, True)
+                self.last_synthesis_ms = 4.0
+            async def __aexit__(self, *args): self.reopens += 1
+            async def __aenter__(self): self.reopens += 1; return self
+
+        async def run():
+            socket, tts = WebSocket(), Tts()
+            call = VoiceLinkCall(socket, "stream-1", "call-1", "caller", "customer", object(), tts, object())
+            await call.speak_reply("Hello")
+            return socket.messages, tts
+
+        messages, tts = asyncio.run(run())
+        self.assertEqual(tts.calls, 2)
+        self.assertEqual(tts.reopens, 2)
+        self.assertTrue(any(message["event"] == "media" for message in messages))
+
     def test_smart_turn_can_commit_a_nonfinal_stt_hypothesis_once(self):
         from gnaniassignment.telephony.voicelink import VoiceLinkCall
 
@@ -131,6 +167,55 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(second)
         self.assertEqual(transcript.text, "kal meri party hai")
         self.assertEqual(metrics[-1]["stt_turn_committed_by"], "smart_turn")
+
+    def test_audio_enhancement_runs_before_voice_link_vad_and_stt(self):
+        import audioop
+        import base64
+        from gnaniassignment.telephony.voicelink import VoiceLinkCall
+        from gnaniassignment.voice.audio_enhancement import AudioEnhancementResult
+
+        class Stt:
+            sample_rate = 16000
+            frame_bytes = 1024
+
+            def __init__(self):
+                self.frames = []
+
+            async def send_pcm(self, frame):
+                self.frames.append(frame)
+
+        class Enhancer:
+            mode = "enabled"
+            backend = "webrtc_apm"
+
+            def __init__(self):
+                self.input = b""
+
+            def process_pcm_s16le(self, pcm):
+                self.input = pcm
+                return AudioEnhancementResult(b"\x01\x00" * (len(pcm) // 2), -42.0, -55.0, 0.8, 0.2)
+
+        async def run():
+            stt, enhancer = Stt(), Enhancer()
+            call = VoiceLinkCall(object(), "stream-1", "call-1", "caller", "customer", stt, object(), object())
+            call.audio_enhancer = enhancer
+            metrics = []
+
+            async def metric(**values):
+                metrics.append(values)
+
+            call.metric = metric
+            pcm_8k = b"\x00\x00" * 160
+            payload = base64.b64encode(audioop.lin2alaw(pcm_8k, 2)).decode("ascii")
+            await call.feed_media(payload)
+            await call.feed_media(payload)
+            return stt, enhancer, metrics
+
+        stt, enhancer, metrics = asyncio.run(run())
+        self.assertEqual(len(enhancer.input), 640)
+        self.assertTrue(stt.frames)
+        self.assertEqual(stt.frames[0][:2], b"\x01\x00")
+        self.assertEqual(metrics[-1]["audio_enhancement_mode"], "enabled")
 
     def test_retail_minilm_switch_uses_configured_fallback(self):
         from unittest.mock import patch

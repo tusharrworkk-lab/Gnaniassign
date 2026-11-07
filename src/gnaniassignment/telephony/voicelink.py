@@ -22,8 +22,9 @@ from fastapi import WebSocket
 
 from gnaniassignment.app.container import create_session
 from gnaniassignment.stt.gnani import GnaniRealtimeStt
-from gnaniassignment.tts.gnani import GnaniRealtimeTts
+from gnaniassignment.tts.gnani import GnaniRealtimeTts, GnaniTtsError
 from gnaniassignment.voice.events import VoiceError, VoiceTranscript
+from gnaniassignment.voice.audio_enhancement import AudioEnhancer, create_audio_enhancer
 from gnaniassignment.telephony.latency import CallLatencyStore
 
 
@@ -81,6 +82,8 @@ class VoiceLinkCall:
     semantic_complete_pending: bool = False
     last_committed_transcript: tuple[str | None, str] | None = None
     events: Any | None = field(default=None, repr=False)
+    audio_enhancer: AudioEnhancer | None = field(default=None, repr=False)
+    enhancement_frames: int = 0
 
     async def metric(self, **values: Any) -> None:
         values["elapsed_ms"] = round((time.perf_counter() - self.started_at) * 1000, 1)
@@ -159,6 +162,29 @@ class VoiceLinkCall:
             self.stt.sample_rate,
             self.input_resample_state,
         )
+        if self.audio_enhancer is not None:
+            enhanced = self.audio_enhancer.process_pcm_s16le(pcm_16k)
+            pcm_16k = enhanced.audio
+            self.enhancement_frames += 1
+            # One event per second at VoiceLink's 20 ms cadence keeps the
+            # debugging feed useful without flooding it with audio metadata.
+            if self.enhancement_frames == 1 or self.enhancement_frames % 50 == 0:
+                await self.metric(
+                    audio_enhancement_mode=self.audio_enhancer.mode,
+                    audio_enhancement_backend=self.audio_enhancer.backend,
+                    audio_enhancement_input_rms_dbfs=enhanced.input_rms_dbfs,
+                    audio_enhancement_output_rms_dbfs=enhanced.output_rms_dbfs,
+                    audio_enhancement_processing_ms=enhanced.processing_ms,
+                )
+                await self.trace(
+                    "audio.enhancement",
+                    mode=self.audio_enhancer.mode,
+                    backend=self.audio_enhancer.backend,
+                    input_rms_dbfs=enhanced.input_rms_dbfs,
+                    output_rms_dbfs=enhanced.output_rms_dbfs,
+                    speech_probability=enhanced.speech_probability,
+                    processing_ms=enhanced.processing_ms,
+                )
         boundaries: list[Any] = []
         if self.vad is not None:
             # Both optional detectors consume the exact 16 kHz PCM stream
@@ -245,16 +271,30 @@ class VoiceLinkCall:
         }
         try:
             await self.trace("tts.started", reply_index=self.reply_count, text_characters=len(text))
-            async for chunk in self.tts.synthesize(text):
-                if self.tts.last_first_audio_ms is not None:
-                    self._active_reply_metrics.setdefault(
-                        "tts_first_audio_ms",
-                        round((reply_started - self.started_at) * 1000 + self.tts.last_first_audio_ms, 1),
-                    )
-                    if not self._active_reply_metrics.get("tts_first_audio_emitted"):
-                        self._active_reply_metrics["tts_first_audio_emitted"] = True
-                        await self.trace("tts.first_audio", reply_index=self.reply_count, tts_ttfa_ms=round(self.tts.last_first_audio_ms, 1))
-                await self.send_media(chunk.audio)
+            for attempt in range(2):
+                audio_chunks = 0
+                async for chunk in self.tts.synthesize(text):
+                    audio_chunks += 1
+                    if self.tts.last_first_audio_ms is not None:
+                        self._active_reply_metrics.setdefault(
+                            "tts_first_audio_ms",
+                            round((reply_started - self.started_at) * 1000 + self.tts.last_first_audio_ms, 1),
+                        )
+                        if not self._active_reply_metrics.get("tts_first_audio_emitted"):
+                            self._active_reply_metrics["tts_first_audio_emitted"] = True
+                            await self.trace("tts.first_audio", reply_index=self.reply_count, tts_ttfa_ms=round(self.tts.last_first_audio_ms, 1))
+                    await self.send_media(chunk.audio)
+                if audio_chunks:
+                    break
+                if attempt == 0:
+                    # A terminal complete event with zero audio is not a
+                    # successful spoken reply. Reopen and retry once: no
+                    # caller audio has been sent, so duplication is impossible.
+                    await self.trace("tts.zero_audio_retry", reply_index=self.reply_count)
+                    await self.tts.__aexit__(None, None, None)
+                    await self.tts.__aenter__()
+                    continue
+                raise GnaniTtsError("Gnani TTS completed without producing audio")
             await self.flush_outbound()
             self._active_reply_metrics["tts_completed_ms"] = round(
                 (reply_started - self.started_at) * 1000 + (self.tts.last_synthesis_ms or 0), 1
@@ -380,6 +420,7 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                 await tts.__aenter__()
                 call = VoiceLinkCall(websocket, stream_sid, call_sid, caller_id, customer_id, stt, tts, create_session(customer_id=customer_id))
                 call.events = events
+                call.audio_enhancer = create_audio_enhancer(call.stt.sample_rate)
                 # New generic settings supersede the legacy Silero-only
                 # switch. Keeping that switch preserves existing deployments.
                 vad_mode = os.getenv(
