@@ -238,6 +238,11 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("explicitly authorized", GENERIC_PROMPT)
         self.assertIn("FIRST-REPLY DISCLOSURE", GENERIC_PROMPT)
 
+    def test_personal_assistant_prompt_requires_feminine_first_person_hinglish(self):
+        self.assertIn("FEMALE PERSONA", GENERIC_PROMPT)
+        self.assertIn("main karungi", GENERIC_PROMPT)
+        self.assertIn("karunga", GENERIC_PROMPT)
+
     def test_session_records_a_complete_conversation_turn_for_review(self):
         class ConversationStore:
             def __init__(self):
