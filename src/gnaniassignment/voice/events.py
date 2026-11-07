@@ -14,13 +14,14 @@ class VoiceProcessing:
 
 @dataclass(frozen=True)
 class VoiceTranscript:
-    """A final transcript for one speech segment."""
+    """A transcript hypothesis or final result for one speech segment."""
 
     text: str
     segment_id: str | None = None
     segment_index: int | None = None
     audio_duration_ms: int | None = None
     latency_ms: int | None = None
+    is_final: bool = True
 
 
 @dataclass(frozen=True)

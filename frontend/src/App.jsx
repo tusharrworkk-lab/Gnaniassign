@@ -298,6 +298,19 @@ function runtimeEventTitle(event) {
   const titles = {
     "call.started": "Call opened",
     "call.ended": "Call closed",
+    "media.inbound_started": "Audio stream started",
+    "transcript.partial": "STT hypothesis",
+    "transcript.final": "STT final transcript",
+    "transcript.committed": "Turn committed",
+    "smart_turn.complete": "Smart Turn: caller finished",
+    "smart_turn.incomplete": "Smart Turn: keep listening",
+    "llm.started": "LLM generation started",
+    "llm.first_token": "LLM first token",
+    "llm.completed": "LLM response complete",
+    "tts.started": "TTS synthesis started",
+    "tts.first_audio": "TTS first audio received",
+    "tts.outbound_first_frame": "First audio frame sent",
+    "tts.completed": "TTS audio handed off",
     "transcript.received": "Caller transcript received",
     "classifier.queued": "MiniLM shadow pass queued",
     "classifier.completed": "MiniLM candidate ready",
@@ -310,11 +323,15 @@ function runtimeEventTitle(event) {
 
 function runtimeEventDetail(event) {
   if (event.kind === "transcript.received") return event.text;
+  if (["transcript.partial", "transcript.final", "transcript.committed"].includes(event.kind)) return event.text;
   if (event.kind === "agent.responded") return event.text;
   if (event.kind === "classifier.completed") return `${String(event.label || "unknown").replace("_", " ")} · ${event.confidence == null ? "confidence unavailable" : `${Math.round(event.confidence * 100)}% confidence`}`;
   if (event.kind === "classifier.failed") return event.message || "Check the model path and retail-classifier dependency on the API host.";
   if (event.kind === "classifier.queued") return "Running beside the generic path; it cannot delay the reply.";
   if (event.kind === "prompt.published") return `Version ${event.version} now contains ${event.nodes} instruction${event.nodes === 1 ? "" : "s"}.`;
+  if (event.kind === "llm.first_token") return `${Math.round(event.ttft_ms || 0)} ms after generation began.`;
+  if (event.kind === "tts.first_audio") return `${Math.round(event.tts_ttfa_ms || 0)} ms to first audio from TTS.`;
+  if (event.kind === "tts.completed") return `${event.frames || 0} audio frames handed to VoiceLink.`;
   return event.session_id ? `Session ${event.session_id}` : "Runtime event";
 }
 

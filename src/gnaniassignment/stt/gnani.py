@@ -181,6 +181,11 @@ class GnaniRealtimeStt:
                     segment_index=raw.get("segment_index"),
                     audio_duration_ms=raw.get("audio_duration_ms"),
                     latency_ms=raw.get("latency"),
+                    # Older Gnani events omit this field and have always been
+                    # treated as finals. Preserve that compatibility while
+                    # exposing partial hypotheses when the provider supplies
+                    # an explicit finality flag.
+                    is_final=bool(raw.get("is_final", raw.get("final", True))),
                 )
             elif event_name == "processing":
                 yield GnaniProcessing(timestamp=raw.get("timestamp"))

@@ -76,11 +76,28 @@ class VoiceLinkCall:
     semantic_task: asyncio.Task[None] | None = None
     reply_count: int = 0
     _active_reply_metrics: dict[str, Any] | None = field(default=None, repr=False)
+    turn_queue: asyncio.Queue[VoiceTranscript] | None = field(default=None, repr=False)
+    latest_transcript: VoiceTranscript | None = None
+    semantic_complete_pending: bool = False
+    last_committed_transcript: tuple[str | None, str] | None = None
+    events: Any | None = field(default=None, repr=False)
 
     async def metric(self, **values: Any) -> None:
         values["elapsed_ms"] = round((time.perf_counter() - self.started_at) * 1000, 1)
         if self.latency_store is not None:
             await asyncio.to_thread(self.latency_store.record, self.stream_sid, self.call_sid, self.customer_id, values)
+
+    async def trace(self, kind: str, **values: Any) -> None:
+        """Publish safe, real-time internals; never include raw audio/secrets."""
+        if self.events is not None:
+            await self.events.publish(
+                kind,
+                session_id=self.stream_sid,
+                call_id=self.call_sid,
+                customer_id=self.customer_id,
+                channel="voicelink",
+                **values,
+            )
 
     async def send_media(self, pcm: bytes) -> None:
         """Resample linear TTS PCM and send the documented outbound frame."""
@@ -113,6 +130,8 @@ class VoiceLinkCall:
             self._active_reply_metrics["outbound_frames_sent"] += 1
             self._active_reply_metrics["outbound_last_frame_sent_ms"] = now_ms
             self._active_reply_metrics.setdefault("outbound_first_frame_sent_ms", now_ms)
+            if self._active_reply_metrics["outbound_frames_sent"] == 1:
+                await self.trace("tts.outbound_first_frame", reply_index=self.reply_count, elapsed_ms=now_ms)
         # Preserve real-time audio cadence; sending a full TTS response as fast
         # as the network allows causes carrier-side jitter/garbling.
         await asyncio.sleep(0.02)
@@ -126,7 +145,9 @@ class VoiceLinkCall:
     async def feed_media(self, payload: str) -> list[Any]:
         """Decode, resample, and frame inbound VoiceLink audio for Gnani."""
         self.inbound_packets += 1
-        if self.inbound_packets == 1: await self.metric(media_first_packet_ms=round((time.perf_counter()-self.started_at)*1000,1))
+        if self.inbound_packets == 1:
+            await self.metric(media_first_packet_ms=round((time.perf_counter()-self.started_at)*1000,1))
+            await self.trace("media.inbound_started", sample_rate=VOICE_LINK_SAMPLE_RATE, encoding="audio/alaw")
         if self.inbound_packets == 1 or self.inbound_packets % 100 == 0:
             logger.info("voicelink inbound media: stream=%s packets=%d", self.stream_sid, self.inbound_packets)
         pcm_8k = _decode_alaw(payload)
@@ -147,6 +168,9 @@ class VoiceLinkCall:
                 if boundary.kind == "speech_started":
                     self.vad_speech_active = True
                     self.vad_turn_ended.clear()
+                    self.latest_transcript = None
+                    self.semantic_complete_pending = False
+                    self.last_committed_transcript = None
                 elif boundary.kind == "speech_ended":
                     self.vad_speech_active = False
                     # TEN's acoustic pause is only a trigger for semantic
@@ -181,6 +205,28 @@ class VoiceLinkCall:
             )
         if decision.complete:
             self.vad_turn_ended.set()
+            self.semantic_complete_pending = True
+            await self.commit_latest_transcript("smart_turn")
+
+    async def commit_latest_transcript(self, reason: str) -> bool:
+        """Promote the newest STT hypothesis exactly once for a completed turn.
+
+        Smart Turn can now commit an explicit non-final STT hypothesis after a
+        semantic speech end. If Gnani emits only final transcripts, behavior
+        stays unchanged and the provider final is committed as before.
+        """
+        transcript = self.latest_transcript
+        if transcript is None or not transcript.text.strip() or self.turn_queue is None:
+            return False
+        signature = (transcript.segment_id, transcript.text.strip())
+        if signature == self.last_committed_transcript:
+            return False
+        self.last_committed_transcript = signature
+        await self.turn_queue.put(transcript)
+        await self.metric(stt_turn_committed_by=reason)
+        await self.trace("transcript.committed", text=transcript.text, final=transcript.is_final, reason=reason)
+        logger.info("voicelink transcript committed: stream=%s reason=%s segment=%s", self.stream_sid, reason, transcript.segment_id)
+        return True
 
     async def speak_reply(self, text: str) -> None:
         """Synthesize and send one streamed reply with auditable hand-off timing.
@@ -198,12 +244,16 @@ class VoiceLinkCall:
             "outbound_frames_sent": 0,
         }
         try:
+            await self.trace("tts.started", reply_index=self.reply_count, text_characters=len(text))
             async for chunk in self.tts.synthesize(text):
                 if self.tts.last_first_audio_ms is not None:
                     self._active_reply_metrics.setdefault(
                         "tts_first_audio_ms",
                         round((reply_started - self.started_at) * 1000 + self.tts.last_first_audio_ms, 1),
                     )
+                    if not self._active_reply_metrics.get("tts_first_audio_emitted"):
+                        self._active_reply_metrics["tts_first_audio_emitted"] = True
+                        await self.trace("tts.first_audio", reply_index=self.reply_count, tts_ttfa_ms=round(self.tts.last_first_audio_ms, 1))
                 await self.send_media(chunk.audio)
             await self.flush_outbound()
             self._active_reply_metrics["tts_completed_ms"] = round(
@@ -215,6 +265,7 @@ class VoiceLinkCall:
                 await self.websocket.send_json({"event": "mark", "mark": {"name": "response_done"}})
             self._active_reply_metrics["outbound_mark_sent_ms"] = round((time.perf_counter() - self.started_at) * 1000, 1)
             await self.metric(reply_count=self.reply_count, latest_reply=dict(self._active_reply_metrics))
+            await self.trace("tts.completed", reply_index=self.reply_count, frames=self._active_reply_metrics["outbound_frames_sent"])
             logger.info("voicelink reply handed off: stream=%s metrics=%s", self.stream_sid, self._active_reply_metrics)
         finally:
             self._active_reply_metrics = None
@@ -243,6 +294,8 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
     """
     try:
         await call.metric(stt_final_ms=round((time.perf_counter()-call.started_at)*1000,1), stt_provider_latency_ms=stt_event.latency_ms)
+        llm_started = time.perf_counter()
+        await call.trace("llm.started", transcript_characters=len(stt_event.text), transcript_final=stt_event.is_final)
         if hasattr(call.session, "record_stt_segment"):
             call.session.record_stt_segment(stt_event.text, stt_event.segment_id, stt_event.latency_ms)
         if events is not None:
@@ -264,6 +317,7 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
             if first_chunk_at is None:
                 first_chunk_at = time.perf_counter()
                 await call.metric(llm_ttft_ms=round((first_chunk_at-call.started_at)*1000,1))
+                await call.trace("llm.first_token", ttft_ms=round((first_chunk_at - llm_started) * 1000, 1))
             pending += chunk
             # Start audio at a natural sentence boundary, or cap the fragment
             # so a slow model never becomes a voice note.
@@ -274,6 +328,7 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
         if pending.strip():
             await call.speak_reply(pending.strip())
         await call.metric(llm_completed_ms=round((time.perf_counter()-call.started_at)*1000,1))
+        await call.trace("llm.completed", intent=result["intent"], response_characters=len(result["spoken"] or ""))
         if events is not None:
             await events.publish("agent.responded", session_id=call.stream_sid, intent=result["intent"], text=result["spoken"])
     except Exception as error:
@@ -313,10 +368,18 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                 if call is not None:
                     raise ValueError("VoiceLink stream sent start more than once")
                 stream_sid, call_sid, caller_id, customer_id = _call_context(event)
-                stt, tts = GnaniRealtimeStt(), GnaniRealtimeTts()
+                # VoiceLink endpointing owns the completed-turn decision.
+                # Request a short provider final-silence window so an STT
+                # final arrives promptly even when no interim hypothesis is
+                # available to Smart Turn.
+                stt = GnaniRealtimeStt(
+                    min_silence_ms=int(os.getenv("VOICE_LINK_STT_MIN_SILENCE_MS", "350")),
+                )
+                tts = GnaniRealtimeTts()
                 await stt.__aenter__()
                 await tts.__aenter__()
                 call = VoiceLinkCall(websocket, stream_sid, call_sid, caller_id, customer_id, stt, tts, create_session(customer_id=customer_id))
+                call.events = events
                 # New generic settings supersede the legacy Silero-only
                 # switch. Keeping that switch preserves existing deployments.
                 vad_mode = os.getenv(
@@ -358,6 +421,7 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                 # to respond to every fragment.
                 coalesce_ms = max(250, min(int(os.getenv("VOICELINK_TURN_COALESCE_MS", "1100")), 3000))
                 turns: asyncio.Queue[VoiceTranscript] = asyncio.Queue()
+                call.turn_queue = turns
 
                 async def process_turns() -> None:
                     assert call is not None
@@ -414,12 +478,24 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                     assert call is not None
                     async for stt_event in call.stt.events():
                         if isinstance(stt_event, VoiceTranscript) and stt_event.text.strip():
+                            call.latest_transcript = stt_event
+                            await call.trace(
+                                "transcript.final" if stt_event.is_final else "transcript.partial",
+                                text=stt_event.text,
+                                segment_id=stt_event.segment_id,
+                                provider_latency_ms=stt_event.latency_ms,
+                            )
                             if call.reply_in_progress:
                                 logger.info("voicelink transcript discarded while replying: stream=%s", call.stream_sid)
                                 if events is not None:
                                     await events.publish("transcript.discarded", session_id=call.stream_sid, channel="voicelink", reason="agent_reply_in_progress")
                                 continue
-                            await turns.put(stt_event)
+                            if stt_event.is_final:
+                                await call.commit_latest_transcript("provider_final")
+                            elif call.semantic_complete_pending:
+                                await call.commit_latest_transcript("smart_turn")
+                            elif events is not None:
+                                await events.publish("transcript.partial", session_id=call.stream_sid, customer_id=call.customer_id, text=stt_event.text)
                         elif isinstance(stt_event, VoiceError) and events is not None:
                             await events.publish("stt.failed", session_id=call.stream_sid, message=stt_event.message[:300])
 

@@ -107,6 +107,31 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("outbound_first_frame_sent_ms", reply)
         self.assertIn("outbound_mark_sent_ms", reply)
 
+    def test_smart_turn_can_commit_a_nonfinal_stt_hypothesis_once(self):
+        from gnaniassignment.telephony.voicelink import VoiceLinkCall
+
+        async def run():
+            queue = asyncio.Queue()
+            call = VoiceLinkCall(object(), "stream-1", "call-1", "caller", "customer", object(), object(), object())
+            call.turn_queue = queue
+            call.latest_transcript = GnaniTranscript("kal meri party hai", segment_id="partial-1", is_final=False)
+
+            metrics = []
+
+            async def metric(**values):
+                metrics.append(values)
+
+            call.metric = metric
+            first = await call.commit_latest_transcript("smart_turn")
+            second = await call.commit_latest_transcript("smart_turn")
+            return first, second, queue.get_nowait(), metrics
+
+        first, second, transcript, metrics = asyncio.run(run())
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(transcript.text, "kal meri party hai")
+        self.assertEqual(metrics[-1]["stt_turn_committed_by"], "smart_turn")
+
     def test_retail_minilm_switch_uses_configured_fallback(self):
         from unittest.mock import patch
 

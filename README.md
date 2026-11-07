@@ -66,7 +66,7 @@ Install the raw WebSocket client when you are ready to attach microphone or call
 uv sync --extra gnani-stt
 ```
 
-Set `GNANI_API_KEY` in `.env`. The configured pipeline is `en-IN` at `16000` Hz: signed-16-bit little-endian mono PCM, exactly 1,024 bytes every 32 ms. The raw WebSocket adapter sends `x-vad-*` headers, which the official Python SDK does not expose. `GNANI_MIN_SILENCE_MS=150` balances fast final segments with fewer splits at natural pauses; raise it to `200`–`300` if callers are still split. Do not burst buffered frames.
+Set `GNANI_API_KEY` in `.env`. The configured pipeline is `en-IN` at `16000` Hz: signed-16-bit little-endian mono PCM, exactly 1,024 bytes every 32 ms. The raw WebSocket adapter sends `x-vad-*` headers, which the official Python SDK does not expose. For VoiceLink, `VOICE_LINK_STT_MIN_SILENCE_MS=350` requests prompt provider finals while TEN + Smart Turn decide whether the pause is a complete turn. Do not burst buffered frames.
 
 ### Test the hosted VoiceLink media endpoint locally
 
