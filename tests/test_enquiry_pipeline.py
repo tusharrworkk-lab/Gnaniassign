@@ -667,6 +667,22 @@ class PipelineTests(unittest.TestCase):
         selected = select_memory(history, "generic", "general", "GRC-10003 ka refund kahan hai")
         self.assertEqual([turn.query for turn in selected], ["GRC-10003 ka refund kahan hai"])
 
+    def test_cross_call_memory_requires_an_explicit_continuity_cue(self):
+        history = [
+            ChatTurn(
+                "old", "old", "Previous call: caller asked Tushar to pass on a party message.",
+                "generic", "general",
+            ),
+        ]
+        self.assertEqual(
+            select_memory(history, "generic", "general", "Kal mujhe ek naya message dena hai", require_continuity=True),
+            [],
+        )
+        self.assertEqual(
+            select_memory(history, "generic", "general", "Pichhli baar maine kya bola tha?", require_continuity=True),
+            history,
+        )
+
     def test_generic_prompt_prevents_repeated_greetings_on_continuing_calls(self):
         self.assertIn("Greet at most once per call", GENERIC_PROMPT)
         self.assertIn("continuing call", GENERIC_PROMPT)
@@ -711,6 +727,7 @@ class PipelineTests(unittest.TestCase):
         chat, store = Chat(), MemoryStore()
         session = TurnSession(build_graph(GenericRouter(), generic_agents(chat)), memory_store=store, customer_id="caller-1")
         session.ask("Tushar ko kal party ke baare mein bata dena")
+        self.assertNotIn("Previous call: caller asked about a meeting.", chat.prompts[-1])
         session.ask("haan, bata do")
         self.assertEqual(store.loaded, ("caller-1", 3))
         self.assertIn("Current call context:\nMemory: Coverage: operating region is India.", chat.prompts[-1])
@@ -951,6 +968,35 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual("".join(chunks), 'Hello "world".\nDone')
         self.assertEqual(result["spoken"], "".join(chunks))
         self.assertEqual(session.history[0].summary, "Greeting saved.")
+
+    def test_memory_recall_acknowledgement_is_spoken_before_recalled_answer(self):
+        prior = ChatTurn("old", "old", "Previous call: party at 6 PM.", "generic", "general")
+
+        class MemoryStore:
+            def load_call_summaries(self, customer_id, limit):
+                return [prior]
+            def append(self, customer_id, session_id, turn):
+                pass
+
+        class ToolChat:
+            def stream_complete_with_memory_recall(self, system, user, recall_tool, on_recall_started):
+                on_recall_started()
+                self.recalled = recall_tool()
+                yield '{"answer":"Pichhli baar aapne party ka zikr kiya tha.","memory_summary":"Recalled party."}'
+
+            def stream_complete(self, system, user):
+                yield '{"answer":"Fresh answer.","memory_summary":"Fresh."}'
+
+        chunks: list[str] = []
+        session = TurnSession(
+            build_graph(GenericRouter(), generic_agents(ToolChat())),
+            memory_store=MemoryStore(),
+            customer_id="caller-1",
+        )
+        result = session.ask_stream("Pichhli baar kya baat hui thi?", chunks.append)
+        self.assertTrue(chunks[0].startswith("Haan, ek pal"))
+        self.assertEqual(result["spoken"], "Pichhli baar aapne party ka zikr kiya tha.")
+        self.assertNotIn(chunks[0], result["spoken"])
 
     def test_clarification_is_delivered_to_stream_callback(self):
         session = TurnSession(build_graph(Router(chosen="other"), enquiry_agents(Chat())))

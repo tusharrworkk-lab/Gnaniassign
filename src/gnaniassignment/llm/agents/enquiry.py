@@ -84,6 +84,8 @@ class EnquiryAgent(SubAgent):
         self.calls += 1
         system_prompt, user_prompt = self._prompts(text, memory)
         stream_complete = getattr(self.model, "stream_complete", None)
+        memory_recall = slots.get("memory_recall_tool") if self.name == "generic" else None
+        stream_with_memory_recall = getattr(self.model, "stream_complete_with_memory_recall", None)
         if stream_complete is None:
             output = self._parse_response(self.model.complete(system_prompt, user_prompt), text)
             on_chunk(output.answer)
@@ -92,12 +94,22 @@ class EnquiryAgent(SubAgent):
         raw_parts: list[str] = []
         structured: bool | None = None
         plain_answer_streamed = False
+        invoke = (
+            lambda: stream_with_memory_recall(
+                system_prompt,
+                user_prompt,
+                memory_recall,
+                lambda: on_chunk("Haan, ek pal, main pichhli baat dekh kar batati hoon. "),
+            )
+            if callable(stream_with_memory_recall) and callable(memory_recall)
+            else stream_complete(system_prompt, user_prompt)
+        )
         for chunk in trace_llm_stream(
             agent=self.name,
             model=getattr(self.model, "model", None),
             system=system_prompt,
             user=user_prompt,
-            invoke=lambda: stream_complete(system_prompt, user_prompt),
+            invoke=invoke,
         ):
             raw_parts.append(chunk)
             if structured is None:

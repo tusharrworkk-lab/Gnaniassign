@@ -511,6 +511,63 @@ class BedrockGptOssChatModel:
         finally:
             self.last_stream_ms = (time.perf_counter() - started) * 1000
 
+    def stream_complete_with_memory_recall(self, system: str, user: str, recall_tool, on_recall_started) -> Iterator[str]:
+        """Stream normally, letting GPT-OSS request private recall when needed.
+
+        The first turn contains no prior-call text. If the model emits the
+        sole allowed tool use, application code fetches the caller-scoped
+        summaries and resumes the same Bedrock conversation.
+        """
+        tool_config = {
+            "tools": [{"toolSpec": {"name": "memory_recall", "description": "Retrieve compact summaries from this caller's previous conversations only when the caller explicitly asks about a past conversation.", "inputSchema": {"json": {"type": "object", "properties": {}, "additionalProperties": False}}}}]
+        }
+        request = self._request(system, user)
+        request["toolConfig"] = tool_config
+        messages = request["messages"]
+        response = self.client.converse_stream(**request)
+        tool_blocks: dict[int, dict[str, object]] = {}
+        stop_reason = "unknown"
+        for event in response["stream"]:
+            start = event.get("contentBlockStart", {})
+            start_value = start.get("start", {}) if isinstance(start, dict) else {}
+            tool = start_value.get("toolUse") if isinstance(start_value, dict) else None
+            if isinstance(tool, dict):
+                tool_blocks[int(start.get("contentBlockIndex", 0))] = {"toolUse": {"toolUseId": tool.get("toolUseId"), "name": tool.get("name"), "input": ""}}
+            delta_event = event.get("contentBlockDelta", {})
+            delta = delta_event.get("delta", {}) if isinstance(delta_event, dict) else {}
+            if isinstance(delta, dict):
+                text = delta.get("text")
+                if isinstance(text, str) and text:
+                    yield text
+                tool_delta = delta.get("toolUse")
+                index = int(delta_event.get("contentBlockIndex", 0))
+                if isinstance(tool_delta, dict) and index in tool_blocks:
+                    tool_blocks[index]["toolUse"]["input"] += str(tool_delta.get("input", ""))
+            message_stop = event.get("messageStop")
+            if isinstance(message_stop, dict):
+                stop_reason = str(message_stop.get("stopReason", stop_reason))
+        if stop_reason != "tool_use":
+            return
+        calls = [block["toolUse"] for _, block in sorted(tool_blocks.items())]
+        if len(calls) != 1 or calls[0].get("name") != "memory_recall":
+            raise ValueError("GPT-OSS requested an unsupported tool")
+        # Let speech begin before the database lookup and continuation. The
+        # callback stays outside this generator's text stream so the filler is
+        # not accidentally included in the final LLM answer or its summary.
+        on_recall_started()
+        result = recall_tool()
+        request["messages"] = [
+            *messages,
+            {"role": "assistant", "content": [{"toolUse": call} for call in calls]},
+            {"role": "user", "content": [{"toolResult": {"toolUseId": calls[0]["toolUseId"], "content": [{"json": result}], "status": "success"}}]},
+        ]
+        follow_up = self.client.converse_stream(**request)
+        for event in follow_up["stream"]:
+            delta = event.get("contentBlockDelta", {}).get("delta", {})
+            text = delta.get("text")
+            if isinstance(text, str) and text:
+                yield text
+
 
 class VertexGeminiChatModel:
     """Gemini 2.5 Flash through Vertex AI, streaming text for TTS."""

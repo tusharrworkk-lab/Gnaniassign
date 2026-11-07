@@ -11,7 +11,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from gnaniassignment.api.server import RuntimeEvents, SessionRegistry, create_app
-from gnaniassignment.prompts.tree import _validate_condition
+from gnaniassignment.prompts.tree import PromptNode, PromptPlan, _validate_condition
 
 
 class DashboardRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -34,9 +34,22 @@ class DashboardRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 class PromptConditionTests(unittest.TestCase):
     def test_prompt_conditions_only_allow_runtime_context_keys(self) -> None:
-        _validate_condition({"language": ["hinglish", "english"], "channel": "voice"})
+        _validate_condition({"language": ["hinglish", "english"], "channel": "voice", "customer_id": "caller-42"})
         with self.assertRaises(ValueError):
             _validate_condition({"caller_text": "refund"})
+
+    def test_customer_specific_rule_is_never_rendered_for_another_caller(self) -> None:
+        plan = PromptPlan(
+            tenant_id="default",
+            agent_id="generic",
+            version=1,
+            nodes=(
+                PromptNode("base", None, {}, "Base rule", 10),
+                PromptNode("private", None, {"customer_id": "caller-42"}, "Private rule", 20),
+            ),
+        )
+        self.assertEqual(plan.render({"customer_id": "caller-42"}), "Base rule\n\nPrivate rule")
+        self.assertEqual(plan.render({"customer_id": "caller-99"}), "Base rule")
 
 
 class HarnessApiTests(unittest.TestCase):

@@ -90,7 +90,7 @@ function App() {
     setLastReviewed({ id, label });
   };
   const undoReview = () => { if (lastReviewed) { setReviewed((existing) => { const next = new Set(existing); next.delete(lastReviewed.id); return next; }); setReviewedLabels((existing) => { const next = { ...existing }; delete next[lastReviewed.id]; return next; }); } setLastReviewed(null); };
-  const addInstruction = async (instruction) => {
+  const addInstruction = async ({ instruction, condition = {} }) => {
     if (!dashboardApiConfigured) {
       setInstructionNodes((nodes) => [...nodes, { id: `local-${Date.now()}`, name: "Custom instruction", detail: "Always · local preview", instruction }]);
       setNotice("Saved in this browser preview. Set VITE_AGENT_API_URL to publish it to calls.");
@@ -98,11 +98,11 @@ function App() {
     }
     setSavingInstruction(true);
     try {
-      const plan = await appendPromptNode({ instruction });
+      const plan = await appendPromptNode({ instruction, condition });
       setInstructionNodes(nodesFromPlan(plan.nodes));
       setPromptVersion(plan.version);
       setPromptRuntimeEnabled(Boolean(plan.runtime_enabled));
-      setNotice(`Published prompt version ${plan.version}. New calls now receive this rule.`);
+      setNotice(`Published prompt version ${plan.version}. New matching calls now receive this rule.`);
       return true;
     } catch (error) {
       setNotice(`Could not publish instruction: ${error.message}`);
@@ -202,7 +202,7 @@ function SettingsView({ instructionNodes, setInstructionNodes, preCallTools, set
   const addInstruction = async () => {
     const instruction = newInstruction.trim();
     if (!instruction) return;
-    if (await onAddInstruction(instruction)) { setNewInstruction(""); setShowEditor(false); }
+    if (await onAddInstruction({ instruction })) { setNewInstruction(""); setShowEditor(false); }
   };
   const addServer = () => {
     if (!serverName.trim()) return;
@@ -211,8 +211,10 @@ function SettingsView({ instructionNodes, setInstructionNodes, preCallTools, set
   const toggleTool = (id) => setPreCallTools((tools) => tools.map((tool) => tool.id === id ? { ...tool, enabled: !tool.enabled } : tool));
   return <section className="tab-page setup-page">
     <div className="setup-head"><div><h2>Agent setup</h2><p className="page-intro">Shape what Relay knows before a caller says hello.</p></div><StatusPill tone={isLive && promptRuntimeEnabled ? "mint" : "slate"}>{isLive && promptRuntimeEnabled ? `Published${promptVersion ? ` v${promptVersion}` : ""}` : isLive ? "Stored · off" : "Preview"}</StatusPill></div>
-    <div className="setup-tabs setup-tabs-three" role="tablist" aria-label="Agent setup">
+    <div className="setup-tabs setup-tabs-wide" role="tablist" aria-label="Agent setup">
       <button role="tab" aria-selected={section === "instructions"} className={section === "instructions" ? "selected" : ""} onClick={() => setSection("instructions")}><Icon name="branch" size={17} />Instructions</button>
+      <button role="tab" aria-selected={section === "voice"} className={section === "voice" ? "selected" : ""} onClick={() => setSection("voice")}><Icon name="sliders" size={17} />Voice</button>
+      <button role="tab" aria-selected={section === "memory"} className={section === "memory" ? "selected" : ""} onClick={() => setSection("memory")}><Icon name="database" size={17} />Memory</button>
       <button role="tab" aria-selected={section === "mcp"} className={section === "mcp" ? "selected" : ""} onClick={() => setSection("mcp")}><Icon name="plug" size={17} />MCP prep</button>
       <button role="tab" aria-selected={section === "harness"} className={section === "harness" ? "selected" : ""} onClick={() => setSection("harness")}><Icon name="message" size={17} />Test chat</button>
     </div>
@@ -221,13 +223,52 @@ function SettingsView({ instructionNodes, setInstructionNodes, preCallTools, set
       <div className="setup-route" aria-label="Prompt assembly"><span>Rules</span><i /><span>Prompt</span><i /><span>Call</span></div>
       <div className="instruction-list">{instructionNodes.map((node, index) => <article className="instruction-row" key={node.id}><div className="instruction-order">{index + 1}</div><div><strong>{node.name}</strong><small>{node.detail}</small><p>{node.instruction}</p></div><button className="row-icon" aria-label={`View ${node.name}`} onClick={() => onNotice(node.instruction)}><Icon name="eye" size={17} /></button></article>)}</div>
       {showEditor ? <div className="inline-editor"><label htmlFor="instruction">New instruction</label><textarea id="instruction" value={newInstruction} onChange={(event) => setNewInstruction(event.target.value)} placeholder="Tell Relay exactly how to respond in this situation" /><div><button className="change-button" onClick={() => setShowEditor(false)} disabled={savingInstruction}>Cancel</button><button className="compact-primary" onClick={addInstruction} disabled={savingInstruction}>{savingInstruction ? "Publishing…" : "Add rule"}</button></div></div> : <button className="outline-action" onClick={() => setShowEditor(true)}><Icon name="plus" size={18} />Add instruction</button>}
-    </> : section === "mcp" ? <>
+    </> : section === "voice" ? <VoiceControls onNotice={onNotice} /> : section === "memory" ? <MemoryControls onAddInstruction={onAddInstruction} savingInstruction={savingInstruction} isLive={isLive} onNotice={onNotice} /> : section === "mcp" ? <>
       <section className="setup-hero mcp-hero" aria-labelledby="pre-call-readiness"><div className="setup-hero-mark"><Icon name="database" size={21} /></div><div><h3 id="pre-call-readiness">Pre-call readiness</h3><p>{enabledCount} read-only source{enabledCount === 1 ? "" : "s"} prepare caller context</p></div><span>Ready</span></section>
       <p className="safe-note"><Icon name="shield" size={16} />Only approved read-only tools run before a call. The browser never receives credentials.</p>
       <section className="mcp-connection"><div className="connection-top"><div><span>Remote MCP server</span><strong>Customer context gateway</strong><small>Streamable HTTP · token stored server-side</small></div><StatusPill>Connected</StatusPill></div><button className="plain-link" onClick={() => onNotice("Tool discovery will run from the backend after the MCP configuration API is connected.")}>Refresh tool list <Icon name="refresh" size={16} /></button></section>
       <div className="tool-list">{preCallTools.map((tool) => <article className="tool-row" key={tool.id}><div className="tool-icon"><Icon name={tool.icon} size={18} /></div><div><strong>{tool.name}</strong><small>{tool.description}</small><em>{tool.scope}</em></div><button className={`tool-toggle ${tool.enabled ? "on" : ""}`} aria-pressed={tool.enabled} aria-label={`${tool.enabled ? "Disable" : "Enable"} ${tool.name} before calls`} onClick={() => toggleTool(tool.id)}><i /></button></article>)}</div>
       {showServer ? <div className="inline-editor"><label htmlFor="server">Server name</label><input id="server" value={serverName} onChange={(event) => setServerName(event.target.value)} placeholder="e.g. CRM context" /><small>Endpoint and secret reference are saved by the backend, not this WebView.</small><div><button className="change-button" onClick={() => setShowServer(false)}>Cancel</button><button className="compact-primary" onClick={addServer}>Save server</button></div></div> : <button className="outline-action" onClick={() => setShowServer(true)}><Icon name="plus" size={18} />Add MCP server</button>}
     </> : <HarnessView />}
+  </section>;
+}
+
+function VoiceControls({ onNotice }) {
+  const [showConfig, setShowConfig] = useState(false);
+  const controls = [
+    ["Turn detection", "TEN VAD + Pipecat Smart Turn", "Endpoint mode · acoustic and semantic boundary"],
+    ["STT final silence", "350 ms", "Gnani provider final remains the source of truth"],
+    ["Noise suppression", "WebRTC APM", "Inbound only · moderate profile when enabled"],
+    ["TTS voice", "Shivani · hi-en · 1.0×", "Female Hinglish voice · outbound audio only"],
+    ["Barge-in", "Protected", "Caller speech interrupts a pending reply only after a confirmed turn"],
+  ];
+  return <section className="control-view" aria-labelledby="voice-controls-title">
+    <section className="setup-hero"><div className="setup-hero-mark"><Icon name="sliders" size={21} /></div><div><h3 id="voice-controls-title">Voice runtime</h3><p>Inspect the safeguards that shape a live phone turn.</p></div><span>Deploy config</span></section>
+    <p className="safe-note"><Icon name="shield" size={16} />These values are read from the service at call start. Secrets and provider controls never enter this WebView.</p>
+    <div className="control-list">{controls.map(([name, value, detail]) => <article className="control-row" key={name}><div><strong>{name}</strong><span>{detail}</span></div><b>{value}</b></article>)}</div>
+    <button className="outline-action" onClick={() => setShowConfig((value) => !value)}><Icon name="eye" size={18} />{showConfig ? "Hide rollout guide" : "How to change voice settings"}</button>
+    {showConfig && <div className="rollout-guide"><strong>Safe rollout</strong><p>Test with the local VoiceLink simulator first. Then change the server environment, deploy, and verify <em>speech end → STT final → LLM → first audio frame</em> in Live activity.</p><button className="plain-link" onClick={() => onNotice("Voice configuration is deployment-managed so an accidental WebView tap cannot disrupt live calls.")}>Why this is deployment-managed <Icon name="chevron" size={16} /></button></div>}
+  </section>;
+}
+
+function MemoryControls({ onAddInstruction, savingInstruction, isLive, onNotice }) {
+  const [customerId, setCustomerId] = useState("");
+  const [instruction, setInstruction] = useState("");
+  const [saving, setSaving] = useState(false);
+  const save = async () => {
+    const target = customerId.trim();
+    const rule = instruction.trim();
+    if (!target || !rule || saving || savingInstruction) return;
+    setSaving(true);
+    const saved = await onAddInstruction({ instruction: rule, condition: { customer_id: target } });
+    if (saved) { setInstruction(""); onNotice(`Private rule published for ${target}. It applies on that caller’s next new session.`); }
+    setSaving(false);
+  };
+  return <section className="control-view" aria-labelledby="memory-title">
+    <section className="setup-hero"><div className="setup-hero-mark"><Icon name="database" size={21} /></div><div><h3 id="memory-title">Caller memory</h3><p>Keep continuity compact, relevant, and private.</p></div><span>{isLive ? "Stored" : "Preview"}</span></section>
+    <div className="memory-route"><span>Verified profile</span><i /><span>Call summary</span><i /><span>Working memory</span></div>
+    <div className="memory-policy"><strong>What reaches a new call</strong><p>Verified caller context plus up to three compact prior-call summaries. The full raw transcript remains audit data; it is not replayed into every prompt.</p></div>
+    <div className="inline-editor user-rule-editor"><label htmlFor="caller-id">Caller/customer ID</label><input id="caller-id" value={customerId} onChange={(event) => setCustomerId(event.target.value)} placeholder="e.g. grocery-customer-001" maxLength="256" /><label htmlFor="caller-rule">Private instruction for this person</label><textarea id="caller-rule" value={instruction} onChange={(event) => setInstruction(event.target.value)} placeholder="e.g. This caller prefers a concise English summary after every message." maxLength="4000" /><small>This becomes an exact-match prompt rule. It affects only new calls for this caller ID, never other callers.</small><button className="compact-primary" onClick={save} disabled={!customerId.trim() || !instruction.trim() || saving || savingInstruction}>{saving || savingInstruction ? "Publishing…" : "Publish private rule"}</button></div>
   </section>;
 }
 

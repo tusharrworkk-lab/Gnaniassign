@@ -11,7 +11,7 @@ from langgraph.graph import END, START, StateGraph
 
 from gnaniassignment.domain.ports import IntentRouter
 from gnaniassignment.llm.agents import AgentResponse, SubAgent
-from gnaniassignment.llm.memory import ChatTurn, render_memory, select_memory, topic_from_query
+from gnaniassignment.llm.memory import ChatTurn, render_memory, topic_from_query
 from gnaniassignment.orchestration.working_memory import render_working_memory, update_working_memory
 from gnaniassignment.llm.prompts.intents import INTENT_KEYS, QUESTIONS
 
@@ -84,16 +84,23 @@ def build_graph(
             if state["current_call_history"]
             else "Call status: This is the first response of the call."
         )
-        prior_memory = select_memory(state["prior_call_context"], intent, topic, state["text"])
+        # Never inject an older call into the model prompt. The generic agent
+        # can access it only through its explicit read-only memory_recall tool.
+        prior_memory: list[ChatTurn] = []
         # Active conversation turns are compulsory context; past-call context
         # remains small and relevance-filtered.
         active_memory = state["current_call_history"][-3:]
+        recall_availability = (
+            "Prior-call memory: available only through the memory_recall tool."
+            if state["prior_call_context"]
+            else "Prior-call memory: no completed-call summary is available."
+        )
         return {
             "answers": answers,
             "intent": intent,
             "topic": topic,
             "working_memory": working_memory,
-            "memory": render_working_memory(working_memory) + "\n\n" + state["account_context"] + "\n\n" + call_status + "\n\nCurrent call context:\n" + render_memory(active_memory) + "\n\nRelevant prior-call context:\n" + render_memory(prior_memory),
+            "memory": render_working_memory(working_memory) + "\n\n" + state["account_context"] + "\n\n" + call_status + "\n\n" + recall_availability + "\n\nCurrent call context:\n" + render_memory(active_memory) + "\n\nRelevant prior-call context:\n" + render_memory(prior_memory),
             "metrics": {"intent_ms": (time.perf_counter() - started) * 1000},
         }
 
@@ -143,6 +150,12 @@ def _agent_node(agent: SubAgent):
         started = time.perf_counter()
         on_chunk = config.get("configurable", {}).get("on_answer_chunk")
         slots = {"intent": state["intent"], "topic": state["topic"]}
+        if agent.name == "generic" and state["prior_call_context"]:
+            # The callable is intentionally kept out of the prompt. The model
+            # sees old summaries only after it emits a native tool request.
+            slots["memory_recall_tool"] = lambda: {
+                "summaries": [turn.summary[:320] for turn in state["prior_call_context"][-2:]],
+            }
         if on_chunk is None:
             output = agent.run(state["text"], slots, state["memory"])
         else:

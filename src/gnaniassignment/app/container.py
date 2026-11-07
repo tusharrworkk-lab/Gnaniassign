@@ -182,7 +182,12 @@ def create_prompt_resolver() -> PromptPlanResolver | None:
     )
 
 
-def resolve_prompt(resolver: PromptPlanResolver | None, agent_id: str, fallback: str) -> str:
+def resolve_prompt(
+    resolver: PromptPlanResolver | None,
+    agent_id: str,
+    fallback: str,
+    customer_id: str | None = None,
+) -> str:
     if resolver is None:
         return fallback
     plan = resolver.resolve(
@@ -195,6 +200,7 @@ def resolve_prompt(resolver: PromptPlanResolver | None, agent_id: str, fallback:
         "agent": agent_id,
         "channel": os.getenv("AGENT_CHANNEL", "voice"),
         "language": os.getenv("AGENT_LANGUAGE", "hinglish"),
+        "customer_id": customer_id or "",
     })
     return prompt or fallback
 
@@ -228,7 +234,9 @@ def create_session(
             knowledge=knowledge,
             retriever=retriever,
             guidance=guidance,
-            prompt_override=resolve_prompt(prompt_resolver, "generic", ""),
+            prompt_override=resolve_prompt(
+                prompt_resolver, "generic", "", customer_id=resolved_customer_id
+            ),
         )
         clarification_agent = None
     elif settings.intent_provider == "hinglish_retail":

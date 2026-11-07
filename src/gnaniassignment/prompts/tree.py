@@ -241,7 +241,10 @@ class PostgresPromptTreeEditor:
 def _validate_condition(condition: dict[str, Any]) -> None:
     if not isinstance(condition, dict):
         raise ValueError("condition must be an object")
-    allowed = {"agent", "channel", "language"}
+    # customer_id is intentionally an exact-match condition.  It allows the
+    # dashboard to publish an instruction for one opted-in phone owner without
+    # accidentally exposing it to every other caller.
+    allowed = {"agent", "channel", "language", "customer_id"}
     unknown = set(condition) - allowed
     if unknown:
         raise ValueError(f"condition contains unsupported keys: {', '.join(sorted(unknown))}")
