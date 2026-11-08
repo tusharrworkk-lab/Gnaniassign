@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
-from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -58,6 +58,15 @@ class PromptNodeCreate(BaseModel):
     instruction: str = Field(min_length=1, max_length=4000)
     priority: int = Field(default=100, ge=-10_000, le=10_000)
     condition: dict[str, Any] = Field(default_factory=dict)
+
+
+class PlaneCommentDraftCreate(BaseModel):
+    """A caller-proposed comment. This endpoint never writes to Plane."""
+
+    requested_by: str = Field(min_length=1, max_length=256)
+    project_id: str = Field(min_length=1, max_length=256)
+    work_item_id: str = Field(min_length=1, max_length=256)
+    comment: str = Field(min_length=1, max_length=10_000)
 
 
 @dataclass
@@ -300,6 +309,94 @@ def create_app(registry: SessionRegistry | None = None) -> FastAPI:
         _require_api_key(x_api_key)
         from gnaniassignment.telephony.latency import CallLatencyStore
         return {"calls": await asyncio.to_thread(CallLatencyStore().recent, max(1, min(limit, 500)))}
+
+    def work_actions():
+        from gnaniassignment.work_items import PostgresWorkActionStore
+        return PostgresWorkActionStore()
+
+    @app.get("/v1/integrations/plane/health")
+    async def plane_health(x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        """Verify a server-side Plane token without returning it."""
+        _require_api_key(x_api_key)
+        from gnaniassignment.work_items import PlaneClient, WorkItemProviderError
+        try:
+            user = await asyncio.to_thread(PlaneClient().health)
+        except (ValueError, WorkItemProviderError) as error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+        return {"connected": True, "user_id": user.get("id"), "email": user.get("email")}
+
+    @app.get("/v1/integrations/plane/work-items")
+    async def plane_work_items(limit: int = 25, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        """Read only the small work-item projection needed by the app."""
+        _require_api_key(x_api_key)
+        from gnaniassignment.work_items import PlaneClient, WorkItemProviderError
+        try:
+            items = await asyncio.to_thread(PlaneClient().list_work_items, limit)
+        except (ValueError, WorkItemProviderError) as error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+        return {"provider": "plane", "items": items}
+
+    @app.post("/v1/work-actions/plane/comments", status_code=status.HTTP_201_CREATED)
+    async def create_plane_comment_draft(payload: PlaneCommentDraftCreate, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        try:
+            draft = await asyncio.to_thread(
+                work_actions().create_comment_draft,
+                owner_user_id=os.getenv("WORK_ACTION_OWNER_ID", "owner"),
+                requested_by=payload.requested_by,
+                project_id=payload.project_id,
+                work_item_id=payload.work_item_id,
+                comment=payload.comment,
+            )
+        except (ValueError, RuntimeError) as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+        await sessions.events.publish("work_action.drafted", action_id=draft["id"], provider="plane", action_type="comment")
+        return draft
+
+    @app.get("/v1/work-actions")
+    async def list_work_actions(status_value: str = Query(default="pending", alias="status"), limit: int = 100, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        try:
+            actions = await asyncio.to_thread(work_actions().list_actions, os.getenv("WORK_ACTION_OWNER_ID", "owner"), status_value, limit)
+        except (ValueError, RuntimeError) as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+        return {"actions": actions}
+
+    @app.post("/v1/work-actions/{action_id}/reject")
+    async def reject_work_action(action_id: str, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        updated = await asyncio.to_thread(work_actions().reject, os.getenv("WORK_ACTION_OWNER_ID", "owner"), action_id)
+        if not updated:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Work action is not pending or was not found")
+        await sessions.events.publish("work_action.rejected", action_id=action_id)
+        return {"id": action_id, "status": "rejected"}
+
+    @app.post("/v1/work-actions/{action_id}/approve")
+    async def approve_work_action(action_id: str, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        """Apply exactly one approved draft. The LLM never reaches this route."""
+        _require_api_key(x_api_key)
+        store = work_actions()
+        claimed = await asyncio.to_thread(store.claim_for_approval, os.getenv("WORK_ACTION_OWNER_ID", "owner"), action_id)
+        if claimed is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Work action is not pending or was already decided")
+        try:
+            if claimed["provider"] != "plane" or claimed["action_type"] != "comment":
+                raise ValueError("Unsupported approved work action")
+            draft = claimed["proposed_payload"]
+            result = await asyncio.to_thread(
+                PlaneClient().apply_comment,
+                project_id=str(draft["project_id"]),
+                work_item_id=str(draft["work_item_id"]),
+                comment=str(draft["comment"]),
+                external_id=f"voice-agent:{action_id}",
+            )
+        except (KeyError, ValueError, RuntimeError) as error:
+            await asyncio.to_thread(store.mark_failed, action_id, str(error))
+            await sessions.events.publish("work_action.failed", action_id=action_id, message=str(error)[:300])
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Plane did not accept the approved action") from error
+        await asyncio.to_thread(store.mark_applied, action_id)
+        await sessions.events.publish("work_action.applied", action_id=action_id, provider="plane", action_type="comment")
+        return {"id": action_id, "status": "applied", "provider_result_id": result.get("id") if isinstance(result, dict) else None}
 
     @app.get("/v1/dashboard/prompt-plan")
     async def dashboard_prompt_plan(x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
