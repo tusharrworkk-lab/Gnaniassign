@@ -687,6 +687,10 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Greet at most once per call", GENERIC_PROMPT)
         self.assertIn("continuing call", GENERIC_PROMPT)
 
+    def test_generic_prompt_keeps_clear_message_acknowledgements_natural(self):
+        self.assertIn("without quoting or restating the message", GENERIC_PROMPT)
+        self.assertIn("Never repeat the same message", GENERIC_PROMPT)
+
     def test_session_restores_and_persists_episodic_memory(self):
         class MemoryStore:
             def __init__(self):
