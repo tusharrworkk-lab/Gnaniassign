@@ -36,7 +36,7 @@ jobs:
       - name: Install test dependencies
         # Detector dependencies are tested through deterministic adapters;
         # do not download Torch/ONNX stacks onto the ephemeral CI runner.
-        run: uv sync --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt --extra test
+        run: uv sync --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt --extra google-calendar --extra test
       - name: Run tests
         run: uv run python -m unittest discover -s tests -p 'test_*.py'
 

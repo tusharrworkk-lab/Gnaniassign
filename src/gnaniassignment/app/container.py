@@ -134,6 +134,42 @@ def create_customer_order_window(customer_id: str | None):
     return customer_order_window(customer_id, ORDER_CONTEXT_FACTORIES[provider](database_url))
 
 
+def create_calendar_presence_window():
+    """Read the pre-refreshed private calendar presence snapshot.
+
+    This deliberately performs no Google request while a caller is waiting;
+    the API background task refreshes the snapshot ahead of calls.
+    """
+    if os.getenv("GOOGLE_CALENDAR_ENABLED", "false").lower() not in {"1", "true", "yes", "on"}:
+        return None
+    try:
+        from gnaniassignment.google_calendar import GoogleCalendarSettings, GoogleCalendarStore, calendar_presence_context
+        settings = GoogleCalendarSettings.from_environment()
+        store = GoogleCalendarStore(settings)
+    except (RuntimeError, ValueError):
+        # Calendar setup must never stop the voice agent from answering.
+        return None
+
+    def load(_query: str, _working_memory: dict[str, str]) -> str:
+        try:
+            return calendar_presence_context(store, settings.owner_id)
+        except RuntimeError:
+            return "Calendar presence: unavailable. Do not claim the owner's availability."
+
+    return load
+
+
+def combine_account_context_providers(*providers):
+    active = tuple(provider for provider in providers if provider is not None)
+    if not active:
+        return None
+
+    def load(query: str, working_memory: dict[str, str]) -> str:
+        return "\n\n".join(provider(query, working_memory) for provider in active)
+
+    return load
+
+
 def create_conversation_store() -> PostgresConversationStore | None:
     return PostgresConversationStore() if os.getenv("CONVERSATION_LOGGING_ENABLED", "false").lower() == "true" else None
 
@@ -257,5 +293,8 @@ def create_session(
         conversation_store=conversation_store,
         tracer=create_acil_tracer(),
         call_judge=create_call_judge(),
-        account_context_provider=create_customer_order_window(resolved_customer_id),
+        account_context_provider=combine_account_context_providers(
+            create_customer_order_window(resolved_customer_id),
+            create_calendar_presence_window(),
+        ),
     )

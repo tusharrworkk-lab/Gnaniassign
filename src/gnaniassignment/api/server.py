@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from gnaniassignment.app.config import load_environment
@@ -277,6 +277,42 @@ def create_app(registry: SessionRegistry | None = None) -> FastAPI:
         allow_headers=["Content-Type", "X-API-Key"],
     )
 
+    def calendar_enabled() -> bool:
+        return os.getenv("GOOGLE_CALENDAR_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+
+    def calendar_services():
+        from gnaniassignment.google_calendar import GoogleCalendarClient, GoogleCalendarStore
+        return GoogleCalendarStore(), GoogleCalendarClient()
+
+    async def refresh_calendar_once() -> None:
+        if not calendar_enabled():
+            return
+        from gnaniassignment.google_calendar import CalendarIntegrationError, GoogleCalendarSettings, refresh_current_event
+        try:
+            store, client = calendar_services()
+            settings = GoogleCalendarSettings.from_environment()
+            snapshot = await asyncio.to_thread(refresh_current_event, store, client, settings.owner_id)
+            await sessions.events.publish("calendar.presence_refreshed", status=snapshot.get("status"))
+        except (CalendarIntegrationError, RuntimeError, ValueError) as error:
+            # A disconnected calendar must not affect inbound phone calls.
+            await sessions.events.publish("calendar.refresh_failed", message=str(error)[:240])
+
+    async def calendar_refresh_loop() -> None:
+        while True:
+            await refresh_calendar_once()
+            await asyncio.sleep(max(30, int(os.getenv("GOOGLE_CALENDAR_REFRESH_SECONDS", "60"))))
+
+    @app.on_event("startup")
+    async def begin_calendar_refresh() -> None:
+        if calendar_enabled():
+            app.state.calendar_refresh_task = asyncio.create_task(calendar_refresh_loop())
+
+    @app.on_event("shutdown")
+    async def stop_calendar_refresh() -> None:
+        task = getattr(app.state, "calendar_refresh_task", None)
+        if task is not None:
+            task.cancel()
+
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok", "time": datetime.now(UTC).isoformat()}
@@ -309,6 +345,87 @@ def create_app(registry: SessionRegistry | None = None) -> FastAPI:
         _require_api_key(x_api_key)
         from gnaniassignment.telephony.latency import CallLatencyStore
         return {"calls": await asyncio.to_thread(CallLatencyStore().recent, max(1, min(limit, 500)))}
+
+    @app.get("/v1/integrations/google-calendar/connect")
+    async def google_calendar_connect(x_api_key: str | None = Header(default=None)) -> dict[str, str]:
+        """Return an OAuth URL after dashboard API-key authentication."""
+        _require_api_key(x_api_key)
+        if not calendar_enabled():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Google Calendar integration is disabled")
+        from gnaniassignment.google_calendar import GoogleCalendarClient, GoogleCalendarSettings
+        try:
+            settings = GoogleCalendarSettings.from_environment()
+            return {"authorization_url": GoogleCalendarClient(settings).authorization_url(settings.owner_id)}
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+
+    @app.get("/v1/integrations/google-calendar/callback", response_class=HTMLResponse)
+    async def google_calendar_callback(code: str | None = None, state: str | None = None, error: str | None = None) -> HTMLResponse:
+        """Google's browser redirect endpoint; it never exposes a token."""
+        if error:
+            return HTMLResponse("<h2>Google Calendar was not connected.</h2><p>You can close this tab and try again from the dashboard.</p>", status_code=status.HTTP_400_BAD_REQUEST)
+        if not code or not state:
+            return HTMLResponse("<h2>Calendar connection failed.</h2><p>Missing authorization response.</p>", status_code=status.HTTP_400_BAD_REQUEST)
+        from gnaniassignment.google_calendar import CalendarIntegrationError, GoogleCalendarClient, GoogleCalendarSettings, GoogleCalendarStore, refresh_current_event
+        try:
+            settings = GoogleCalendarSettings.from_environment()
+            client = GoogleCalendarClient(settings)
+            owner_id = client.verify_state(state)
+            result = await asyncio.to_thread(client.exchange_code, code)
+            store = GoogleCalendarStore(settings)
+            await asyncio.to_thread(store.save_refresh_token, owner_id, result["refresh_token"], result.get("scope"))
+            await asyncio.to_thread(refresh_current_event, store, client, owner_id)
+            await sessions.events.publish("calendar.connected", owner_id=owner_id)
+        except (CalendarIntegrationError, RuntimeError, ValueError, KeyError) as exc:
+            return HTMLResponse("<h2>Calendar connection failed.</h2><p>Please return to the dashboard and start again.</p>", status_code=status.HTTP_400_BAD_REQUEST)
+        return HTMLResponse("<h2>Google Calendar connected.</h2><p>Your current availability is now ready for future calls. You can close this tab.</p>")
+
+    @app.get("/v1/integrations/google-calendar/status")
+    async def google_calendar_status(x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        if not calendar_enabled():
+            return {"enabled": False, "connected": False}
+        from gnaniassignment.google_calendar import GoogleCalendarSettings
+        try:
+            settings = GoogleCalendarSettings.from_environment()
+            store, _ = calendar_services()
+            snapshot = await asyncio.to_thread(store.snapshot, settings.owner_id)
+            return {
+                "enabled": True,
+                "connected": await asyncio.to_thread(store.is_connected, settings.owner_id),
+                "presence": {key: snapshot.get(key) for key in ("status", "busy_until", "refreshed_at")} if snapshot else None,
+            }
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+
+    @app.post("/v1/integrations/google-calendar/refresh")
+    async def google_calendar_refresh(x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        if not calendar_enabled():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Google Calendar integration is disabled")
+        from gnaniassignment.google_calendar import CalendarIntegrationError, GoogleCalendarSettings, refresh_current_event
+        try:
+            settings = GoogleCalendarSettings.from_environment()
+            store, client = calendar_services()
+            snapshot = await asyncio.to_thread(refresh_current_event, store, client, settings.owner_id)
+        except (CalendarIntegrationError, RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+        return {key: snapshot.get(key) for key in ("status", "busy_until")}
+
+    @app.post("/v1/integrations/google-calendar/disconnect")
+    async def google_calendar_disconnect(x_api_key: str | None = Header(default=None)) -> dict[str, bool]:
+        _require_api_key(x_api_key)
+        if not calendar_enabled():
+            return {"disconnected": False}
+        from gnaniassignment.google_calendar import GoogleCalendarSettings
+        try:
+            settings = GoogleCalendarSettings.from_environment()
+            store, _ = calendar_services()
+            await asyncio.to_thread(store.disconnect, settings.owner_id)
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+        await sessions.events.publish("calendar.disconnected")
+        return {"disconnected": True}
 
     def work_actions():
         from gnaniassignment.work_items import PostgresWorkActionStore

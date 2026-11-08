@@ -1444,6 +1444,9 @@ gemini = [
 gnani-stt = [
     { name = "websockets" },
 ]
+google-calendar = [
+    { name = "cryptography" },
+]
 local-laya = [
     { name = "laya" },
     { name = "torch" },
@@ -1488,6 +1491,7 @@ vllm = [
 requires-dist = [
     { name = "accelerate", marker = "extra == 'transformers-experiment'" },
     { name = "boto3", marker = "extra == 'bedrock'" },
+    { name = "cryptography", marker = "extra == 'google-calendar'", specifier = ">=44" },
     { name = "datasets", marker = "extra == 'transformers-experiment'" },
     { name = "fastapi", marker = "extra == 'api'", specifier = ">=0.115" },
     { name = "google-genai", marker = "extra == 'gemini'" },
@@ -1520,7 +1524,7 @@ requires-dist = [
     { name = "vllm", marker = "extra == 'vllm'" },
     { name = "websockets", marker = "extra == 'gnani-stt'" },
 ]
-provides-extras = ["local-laya", "local-laya-fast", "gnani-stt", "decision-model", "transformers-experiment", "retail-classifier", "vllm", "gemini", "bedrock", "postgres-memory", "redis-cache", "api", "silero-vad", "turn-detection", "audio-enhancement", "test"]
+provides-extras = ["local-laya", "local-laya-fast", "gnani-stt", "decision-model", "transformers-experiment", "retail-classifier", "vllm", "gemini", "bedrock", "postgres-memory", "redis-cache", "api", "silero-vad", "turn-detection", "audio-enhancement", "google-calendar", "test"]
 
 [[package]]
 name = "google-auth"

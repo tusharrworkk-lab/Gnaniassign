@@ -19,6 +19,8 @@ frontend/dist/
 .env.*
 !.env.example
 !.env.local-cloud.example
+# OAuth client-secret downloads and other local credential bundles.
+credentials/
 
 # Machine-specific native laya.cpp checkout, models and service scripts
 local/
