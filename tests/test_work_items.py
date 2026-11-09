@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from gnaniassignment.work_items import PlaneClient, PlaneSettings
+from gnaniassignment.work_items import PlaneClient, PlaneSettings, render_work_item_voice_context, requested_work_item_identifier
 
 
 class Response:
@@ -65,4 +65,19 @@ class PlaneClientTests(unittest.TestCase):
         with patch.dict("os.environ", {}, clear=True):
             with self.assertRaisesRegex(ValueError, "PLANE_API_KEY"):
                 PlaneSettings.from_environment()
+
+    def test_identifier_is_extracted_only_for_an_explicit_work_request(self):
+        self.assertEqual(requested_work_item_identifier("SC-42 ka status kya hai?"), "SC-42")
+        self.assertIsNone(requested_work_item_identifier("SC-42 mera flat number hai"))
+
+    def test_find_work_item_is_exact_and_bounded(self):
+        session = Session([Response({"data": [{"identifier": "SC-41"}, {"identifier": "SC-42", "name": "Voice status"}]})])
+        result = PlaneClient(self.settings, session).find_work_item("sc-42")
+        self.assertEqual(result["name"], "Voice status")
+        self.assertEqual(session.calls[0][2]["params"]["per_page"], "100")
+
+    def test_voice_context_is_a_small_factual_projection(self):
+        context = render_work_item_voice_context({"identifier": "SC-42", "name": "Ship call agent", "state": {"name": "In Progress"}, "priority": "high", "assignees": [{"name": "Tushar"}]})
+        self.assertIn("Verified Plane work-item context", context)
+        self.assertIn("state: In Progress", context)
 
