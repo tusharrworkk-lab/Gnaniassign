@@ -346,6 +346,15 @@ def create_app(registry: SessionRegistry | None = None) -> FastAPI:
         from gnaniassignment.telephony.latency import CallLatencyStore
         return {"calls": await asyncio.to_thread(CallLatencyStore().recent, max(1, min(limit, 500)))}
 
+    @app.get("/v1/dashboard/evals/voice")
+    async def dashboard_voice_evals(limit: int = 100, silent_after_ms: int = 2500, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        """Return metadata-only per-turn voice SLOs and their source records."""
+        _require_api_key(x_api_key)
+        from gnaniassignment.telephony.evaluation import summarize_turns
+        from gnaniassignment.telephony.latency import CallLatencyStore
+        turns = await asyncio.to_thread(CallLatencyStore().recent_turns, max(1, min(limit, 500)))
+        return {"summary": summarize_turns(turns, max(100, min(silent_after_ms, 30000))), "turns": turns}
+
     @app.get("/v1/integrations/google-calendar/connect")
     async def google_calendar_connect(x_api_key: str | None = Header(default=None)) -> dict[str, str]:
         """Return an OAuth URL after dashboard API-key authentication."""

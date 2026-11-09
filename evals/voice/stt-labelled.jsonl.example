@@ -1,0 +1,3 @@
+{"id":"hinglish-clean-001","category":"clean_speech","reference_text":"kal meri party hai chhah baje","hypothesis_text":"kal meri party hai chhah baje"}
+{"id":"hinglish-time-001","category":"dates_and_times","reference_text":"meeting kal saade nau baje hai","hypothesis_text":"meeting kal saade nau baje hai"}
+{"id":"hinglish-noise-001","category":"background_noise","reference_text":"tushar ko bol dena main late aaunga","hypothesis_text":"tushar ko bol dena main let aaunga"}

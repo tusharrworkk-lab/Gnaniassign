@@ -84,6 +84,97 @@ class VoiceLinkCall:
     events: Any | None = field(default=None, repr=False)
     audio_enhancer: AudioEnhancer | None = field(default=None, repr=False)
     enhancement_frames: int = 0
+    turn_index: int = 0
+    last_speech_started_ms: float | None = None
+    last_speech_ended_ms: float | None = None
+    last_turn_committed_ms: float | None = None
+    active_turn_evaluation: dict[str, Any] | None = field(default=None, repr=False)
+    reply_interrupted: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    barge_in_active: bool = False
+
+    def elapsed_ms(self) -> float:
+        return round((time.perf_counter() - self.started_at) * 1000, 1)
+
+    async def begin_turn_evaluation(self) -> None:
+        """Start a per-turn record. It deliberately contains no transcript/audio."""
+        self.turn_index += 1
+        started = self.elapsed_ms()
+        speech_end = self.last_speech_ended_ms
+        # VAD may be off in a controlled rollout. In that case provider-final
+        # is the best available turn boundary, and the source is recorded so
+        # dashboards never confuse it with a true acoustic end-of-speech.
+        anchor = speech_end if speech_end is not None else (self.last_turn_committed_ms or started)
+        self.active_turn_evaluation = {
+            "turn_index": self.turn_index,
+            "speech_started_at_ms": self.last_speech_started_ms,
+            "speech_ended_at_ms": speech_end,
+            "turn_committed_at_ms": self.last_turn_committed_ms or started,
+            "response_latency_anchor_at_ms": anchor,
+            "response_latency_anchor": "speech_end" if speech_end is not None else "turn_committed",
+            "turn_processing_started_at_ms": started,
+        }
+
+    def note_llm_first_token(self) -> None:
+        if self.active_turn_evaluation is None or "llm_ttft_latency_ms" in self.active_turn_evaluation:
+            return
+        now = self.elapsed_ms()
+        self.active_turn_evaluation["llm_first_token_at_ms"] = now
+        self.active_turn_evaluation["llm_ttft_latency_ms"] = round(now - self.active_turn_evaluation["turn_committed_at_ms"], 1)
+
+    def note_first_outbound_audio(self) -> None:
+        if self.active_turn_evaluation is None or "first_outbound_audio_at_ms" in self.active_turn_evaluation:
+            return
+        now = self.elapsed_ms()
+        self.active_turn_evaluation["first_outbound_audio_at_ms"] = now
+        self.active_turn_evaluation["first_outbound_audio_latency_ms"] = round(now - self.active_turn_evaluation["response_latency_anchor_at_ms"], 1)
+        self.active_turn_evaluation["post_commit_first_outbound_audio_latency_ms"] = round(now - self.active_turn_evaluation["turn_committed_at_ms"], 1)
+
+    def note_barge_in(self) -> bool:
+        if self.active_turn_evaluation is None or "barge_in_detected_at_ms" in self.active_turn_evaluation:
+            return False
+        self.active_turn_evaluation["barge_in_detected_at_ms"] = self.elapsed_ms()
+        self.active_turn_evaluation["barge_in_stop_supported"] = True
+        return True
+
+    async def interrupt_active_reply(self) -> bool:
+        """Stop queued and future agent audio after a caller barge-in.
+
+        VoiceLink's ``clear`` discards provider-side buffered media. The
+        running TTS loop also observes ``reply_interrupted`` before emitting
+        another frame, so this is a genuine hand-off stop rather than a metric
+        that merely reports detection.
+        """
+        if not self.reply_in_progress or self.reply_interrupted.is_set():
+            return False
+        detected = self.note_barge_in()
+        self.reply_interrupted.set()
+        self.barge_in_active = True
+        self.outbound_buffer.clear()
+        async with self.send_lock:
+            await self.websocket.send_json({"event": "clear", "stream_sid": self.stream_sid})
+        stopped_at = self.elapsed_ms()
+        if self.active_turn_evaluation is not None:
+            self.active_turn_evaluation["barge_in_clear_sent_at_ms"] = stopped_at
+            detected_at = self.active_turn_evaluation.get("barge_in_detected_at_ms")
+            if isinstance(detected_at, (int, float)):
+                self.active_turn_evaluation["barge_in_stop_latency_ms"] = round(stopped_at - detected_at, 1)
+        await self.trace("barge_in.stopped", clear_sent=True, stop_latency_ms=(self.active_turn_evaluation or {}).get("barge_in_stop_latency_ms"))
+        return detected
+
+    async def finish_turn_evaluation(self, outcome: str) -> None:
+        turn = self.active_turn_evaluation
+        if turn is None:
+            return
+        turn["evaluation_finalized"] = True
+        turn["outcome"] = outcome
+        turn["finished_at_ms"] = self.elapsed_ms()
+        silent_after_ms = max(100, int(os.getenv("VOICE_EVAL_SILENT_TURN_TIMEOUT_MS", "2500")))
+        latency = turn.get("first_outbound_audio_latency_ms")
+        turn["silent_turn"] = not isinstance(latency, (int, float)) or latency > silent_after_ms
+        if self.latency_store is not None:
+            await asyncio.to_thread(self.latency_store.record_turn, self.stream_sid, self.call_sid, self.customer_id, self.turn_index, dict(turn))
+        await self.trace("eval.turn_completed", turn_index=self.turn_index, silent_turn=turn["silent_turn"], outcome=outcome, first_outbound_audio_latency_ms=latency)
+        self.active_turn_evaluation = None
 
     async def metric(self, **values: Any) -> None:
         values["elapsed_ms"] = round((time.perf_counter() - self.started_at) * 1000, 1)
@@ -104,7 +195,7 @@ class VoiceLinkCall:
 
     async def send_media(self, pcm: bytes) -> None:
         """Resample linear TTS PCM and send the documented outbound frame."""
-        if not pcm:
+        if not pcm or self.reply_interrupted.is_set():
             return
         converted, self.output_resample_state = audioop.ratecv(
             pcm,
@@ -123,24 +214,27 @@ class VoiceLinkCall:
             await self._send_outbound_frame(frame)
 
     async def _send_outbound_frame(self, alaw: bytes) -> None:
+        if self.reply_interrupted.is_set():
+            return
         async with self.send_lock:
             await self.websocket.send_json({"event": "media", "media": {"payload": base64.b64encode(alaw).decode("ascii")}})
         # This measures that our server handed a frame to the WebSocket.  It
         # is deliberately *not* labelled "played": VoiceLink's documented
         # media/mark events do not acknowledge handset playback.
         if self._active_reply_metrics is not None:
-            now_ms = round((time.perf_counter() - self.started_at) * 1000, 1)
+            now_ms = self.elapsed_ms()
             self._active_reply_metrics["outbound_frames_sent"] += 1
             self._active_reply_metrics["outbound_last_frame_sent_ms"] = now_ms
             self._active_reply_metrics.setdefault("outbound_first_frame_sent_ms", now_ms)
             if self._active_reply_metrics["outbound_frames_sent"] == 1:
+                self.note_first_outbound_audio()
                 await self.trace("tts.outbound_first_frame", reply_index=self.reply_count, elapsed_ms=now_ms)
         # Preserve real-time audio cadence; sending a full TTS response as fast
         # as the network allows causes carrier-side jitter/garbling.
         await asyncio.sleep(0.02)
 
     async def flush_outbound(self) -> None:
-        if self.outbound_buffer:
+        if self.outbound_buffer and not self.reply_interrupted.is_set():
             frame = bytes(self.outbound_buffer)
             self.outbound_buffer.clear()
             await self._send_outbound_frame(frame)
@@ -192,12 +286,14 @@ class VoiceLinkCall:
             boundaries = self.vad.feed_pcm_s16le(pcm_16k)
             for boundary in boundaries:
                 if boundary.kind == "speech_started":
+                    self.last_speech_started_ms = self.elapsed_ms()
                     self.vad_speech_active = True
                     self.vad_turn_ended.clear()
                     self.latest_transcript = None
                     self.semantic_complete_pending = False
                     self.last_committed_transcript = None
                 elif boundary.kind == "speech_ended":
+                    self.last_speech_ended_ms = self.elapsed_ms()
                     self.vad_speech_active = False
                     # TEN's acoustic pause is only a trigger for semantic
                     # analysis. It is not yet permission to commit a turn.
@@ -248,6 +344,7 @@ class VoiceLinkCall:
         if signature == self.last_committed_transcript:
             return False
         self.last_committed_transcript = signature
+        self.last_turn_committed_ms = self.elapsed_ms()
         await self.turn_queue.put(transcript)
         await self.metric(stt_turn_committed_by=reason)
         await self.trace("transcript.committed", text=transcript.text, final=transcript.is_final, reason=reason)
@@ -261,6 +358,8 @@ class VoiceLinkCall:
         therefore isolate TTS and server-to-VoiceLink hand-off, while making
         no unsupported claim about when the caller's handset played the audio.
         """
+        if self.reply_interrupted.is_set():
+            return
         self.reply_count += 1
         reply_started = time.perf_counter()
         self._active_reply_metrics = {
@@ -274,6 +373,9 @@ class VoiceLinkCall:
             for attempt in range(2):
                 audio_chunks = 0
                 async for chunk in self.tts.synthesize(text):
+                    if self.reply_interrupted.is_set():
+                        self.outbound_buffer.clear()
+                        return
                     audio_chunks += 1
                     if self.tts.last_first_audio_ms is not None:
                         self._active_reply_metrics.setdefault(
@@ -296,6 +398,8 @@ class VoiceLinkCall:
                     continue
                 raise GnaniTtsError("Gnani TTS completed without producing audio")
             await self.flush_outbound()
+            if self.reply_interrupted.is_set():
+                return
             self._active_reply_metrics["tts_completed_ms"] = round(
                 (reply_started - self.started_at) * 1000 + (self.tts.last_synthesis_ms or 0), 1
             )
@@ -332,6 +436,10 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
     """Generate one response without letting a recoverable model failure kill
     the STT receiver for the rest of the telephone call.
     """
+    outcome = "completed"
+    call.reply_interrupted.clear()
+    call.barge_in_active = False
+    await call.begin_turn_evaluation()
     try:
         await call.metric(stt_final_ms=round((time.perf_counter()-call.started_at)*1000,1), stt_provider_latency_ms=stt_event.latency_ms)
         llm_started = time.perf_counter()
@@ -356,6 +464,7 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
                 continue
             if first_chunk_at is None:
                 first_chunk_at = time.perf_counter()
+                call.note_llm_first_token()
                 await call.metric(llm_ttft_ms=round((first_chunk_at-call.started_at)*1000,1))
                 await call.trace("llm.first_token", ttft_ms=round((first_chunk_at - llm_started) * 1000, 1))
             pending += chunk
@@ -364,14 +473,20 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
             if any(mark in pending for mark in ".!?") or len(pending) >= 90:
                 await call.speak_reply(pending.strip())
                 pending = ""
+                if call.reply_interrupted.is_set():
+                    outcome = "interrupted"
+                    break
         result = await generation
-        if pending.strip():
+        if pending.strip() and not call.reply_interrupted.is_set():
             await call.speak_reply(pending.strip())
+        if call.reply_interrupted.is_set():
+            outcome = "interrupted"
         await call.metric(llm_completed_ms=round((time.perf_counter()-call.started_at)*1000,1))
         await call.trace("llm.completed", intent=result["intent"], response_characters=len(result["spoken"] or ""))
         if events is not None:
             await events.publish("agent.responded", session_id=call.stream_sid, intent=result["intent"], text=result["spoken"])
     except Exception as error:
+        outcome = "failed"
         # A model may exhaust its reasoning/output budget. The caller should
         # hear a retry prompt and the next final STT segment must still work.
         logger.exception("voicelink turn failed: stream=%s", call.stream_sid)
@@ -382,6 +497,8 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
             await call.speak_reply("Maaf kijiye, main jawab taiyar nahi kar paayi. Kripya ek baar phir se bataiye.")
         except Exception:
             logger.exception("voicelink fallback speech failed: stream=%s", call.stream_sid)
+    finally:
+        await call.finish_turn_evaluation(outcome)
 
 
 async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = None) -> None:
@@ -526,7 +643,7 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                                 segment_id=stt_event.segment_id,
                                 provider_latency_ms=stt_event.latency_ms,
                             )
-                            if call.reply_in_progress:
+                            if call.reply_in_progress and not call.barge_in_active:
                                 logger.info("voicelink transcript discarded while replying: stream=%s", call.stream_sid)
                                 if events is not None:
                                     await events.publish("transcript.discarded", session_id=call.stream_sid, channel="voicelink", reason="agent_reply_in_progress")
@@ -548,6 +665,10 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                 if isinstance(media, dict) and media.get("track") == "inbound" and isinstance(media.get("payload"), str):
                     boundaries = await call.feed_media(media["payload"])
                     for boundary in boundaries:
+                        if boundary.kind == "speech_started" and call.reply_in_progress:
+                            stopped = await call.interrupt_active_reply()
+                            if stopped:
+                                await call.trace("barge_in.detected", detector=call.vad_backend, stop_supported=True)
                         await call.metric(turn_detector_event=boundary.kind, turn_detector=call.vad_backend)
                         if events is not None:
                             await events.publish("vad." + boundary.kind, session_id=call.stream_sid, channel="voicelink", mode=call.vad_mode, detector=call.vad_backend)

@@ -3,6 +3,9 @@ from __future__ import annotations
 import json, os
 from typing import Any
 
+VOICE_TURN_TABLE_SQL = "CREATE TABLE IF NOT EXISTS voice_turn_evaluations (stream_sid TEXT NOT NULL, turn_index INTEGER NOT NULL, call_sid TEXT NOT NULL, customer_id TEXT, metrics JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(stream_sid, turn_index))"
+VOICE_TURN_INDEX_SQL = "CREATE INDEX IF NOT EXISTS voice_turn_evaluations_updated_idx ON voice_turn_evaluations (updated_at DESC)"
+
 class CallLatencyStore:
     def __init__(self, database_url: str | None = None) -> None:
         self.database_url = database_url or os.getenv("CONVERSATION_LOG_DATABASE_URL") or os.getenv("EPISODIC_MEMORY_DATABASE_URL")
@@ -17,3 +20,21 @@ class CallLatencyStore:
         with psycopg.connect(self.database_url) as c, c.cursor() as q:
             q.execute("SELECT stream_sid,call_sid,customer_id,metrics,created_at,updated_at FROM call_latency_metrics ORDER BY updated_at DESC LIMIT %s", (limit,))
             return [{"stream_sid":r[0],"call_sid":r[1],"customer_id":r[2],"metrics":r[3],"created_at":r[4].isoformat(),"updated_at":r[5].isoformat()} for r in q.fetchall()]
+
+    def record_turn(self, stream_sid: str, call_sid: str, customer_id: str, turn_index: int, metrics: dict[str, Any]) -> None:
+        """Persist one privacy-preserving evaluation record per user turn."""
+        import psycopg
+        with psycopg.connect(self.database_url) as c, c.cursor() as q:
+            q.execute(VOICE_TURN_TABLE_SQL)
+            q.execute(VOICE_TURN_INDEX_SQL)
+            q.execute("INSERT INTO voice_turn_evaluations (stream_sid,turn_index,call_sid,customer_id,metrics) VALUES (%s,%s,%s,%s,%s::jsonb) ON CONFLICT (stream_sid,turn_index) DO UPDATE SET metrics=voice_turn_evaluations.metrics || EXCLUDED.metrics, updated_at=now()", (stream_sid, turn_index, call_sid, customer_id, json.dumps(metrics)))
+
+    def recent_turns(self, limit: int = 100) -> list[dict[str, Any]]:
+        import psycopg
+        with psycopg.connect(self.database_url) as c, c.cursor() as q:
+            # Existing deployments have a persistent PostgreSQL volume, so
+            # docker-entrypoint init scripts are not re-run on upgrade.
+            q.execute(VOICE_TURN_TABLE_SQL)
+            q.execute(VOICE_TURN_INDEX_SQL)
+            q.execute("SELECT stream_sid,turn_index,call_sid,customer_id,metrics,created_at,updated_at FROM voice_turn_evaluations ORDER BY updated_at DESC LIMIT %s", (limit,))
+            return [{"stream_sid": r[0], "turn_index": r[1], "call_sid": r[2], "customer_id": r[3], "metrics": r[4], "created_at": r[5].isoformat(), "updated_at": r[6].isoformat()} for r in q.fetchall()]
