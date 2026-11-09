@@ -1,3 +1,13 @@
+# Build the mobile dashboard independently. It uses same-origin API requests
+# and never receives a production API key at build time.
+FROM node:20-bookworm-slim AS dashboard-build
+WORKDIR /dashboard
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend ./
+ENV VITE_DASHBOARD_SAME_ORIGIN=true
+RUN npm run build
+
 # Production HTTP/webhook container. Voice capture/playback is handled by the
 # telephony media adapter, not ALSA inside this cloud container.
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
@@ -18,6 +28,7 @@ RUN uv sync --frozen --no-dev --no-install-project \
     --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt --extra turn-detection --extra audio-enhancement --extra google-calendar
 
 COPY src ./src
+COPY --from=dashboard-build /dashboard/dist ./dashboard
 RUN uv sync --frozen --no-dev --no-editable \
     --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt --extra turn-detection --extra audio-enhancement --extra google-calendar
 

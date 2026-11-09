@@ -30,6 +30,39 @@ class PostgresIntentFeedbackStore:
                 (customer_id, session_id, query, choice, float(confidence), json.dumps(probabilities)),
             )
 
+    def pending(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Return the private operator queue; never treat predictions as labels."""
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, query_text, predicted_intent, confidence, created_at
+                FROM intent_shadow_observations
+                WHERE reviewed_intent IS NULL
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return [
+                {
+                    "id": row[0], "text": row[1], "intent": row[2],
+                    "confidence": row[3], "created_at": row[4].isoformat(),
+                }
+                for row in cursor.fetchall()
+            ]
+
+    def review(self, observation_id: int, final_intent: str) -> bool:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE intent_shadow_observations
+                SET reviewed_intent = %s, reviewed_at = now()
+                WHERE id = %s AND reviewed_intent IS NULL
+                """,
+                (final_intent, observation_id),
+            )
+            return cursor.rowcount == 1
+
     def _connect(self):
         try:
             import psycopg

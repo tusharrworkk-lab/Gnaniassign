@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import os
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, AsyncIterator
@@ -20,6 +21,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from gnaniassignment.app.config import load_environment
@@ -67,6 +69,10 @@ class PlaneCommentDraftCreate(BaseModel):
     project_id: str = Field(min_length=1, max_length=256)
     work_item_id: str = Field(min_length=1, max_length=256)
     comment: str = Field(min_length=1, max_length=10_000)
+
+
+class IntentReviewUpdate(BaseModel):
+    intent: str = Field(min_length=1, max_length=64)
 
 
 @dataclass
@@ -345,6 +351,52 @@ def create_app(registry: SessionRegistry | None = None) -> FastAPI:
         _require_api_key(x_api_key)
         from gnaniassignment.telephony.latency import CallLatencyStore
         return {"calls": await asyncio.to_thread(CallLatencyStore().recent, max(1, min(limit, 500)))}
+
+    @app.get("/v1/dashboard/overview")
+    async def dashboard_overview(limit: int = 20, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        """Private dashboard projection from durable call and review records."""
+        _require_api_key(x_api_key)
+        from gnaniassignment.intent_feedback import PostgresIntentFeedbackStore
+        from gnaniassignment.telephony.evaluation import summarize_turns
+        from gnaniassignment.telephony.latency import CallLatencyStore
+        bounded = max(1, min(limit, 100))
+        try:
+            latency = CallLatencyStore()
+            calls, turns, reviews = await asyncio.gather(
+                asyncio.to_thread(latency.recent, bounded),
+                asyncio.to_thread(latency.recent_turns, min(500, bounded * 5)),
+                asyncio.to_thread(PostgresIntentFeedbackStore().pending, bounded),
+            )
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+        completed = sum(1 for call in calls if call["metrics"].get("call_ended"))
+        return {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "summary": {
+                "calls_observed": len(calls),
+                "calls_completed": completed,
+                "review_queue": len(reviews),
+                "voice_evaluation": summarize_turns(turns),
+            },
+            "calls": calls,
+            "reviews": reviews,
+        }
+
+    @app.post("/v1/dashboard/intent-reviews/{observation_id}")
+    async def dashboard_review_intent(observation_id: int, payload: IntentReviewUpdate, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        from gnaniassignment.intent_feedback import PostgresIntentFeedbackStore
+        from gnaniassignment.llm.retail_minilm import RETAIL_MINILM_KEYS
+        if payload.intent not in RETAIL_MINILM_KEYS:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unknown retail intent label")
+        try:
+            updated = await asyncio.to_thread(PostgresIntentFeedbackStore().review, observation_id, payload.intent)
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+        if not updated:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Review was already completed or does not exist")
+        await sessions.events.publish("classifier.reviewed", observation_id=observation_id, intent=payload.intent)
+        return {"id": observation_id, "intent": payload.intent, "reviewed": True}
 
     @app.get("/v1/dashboard/evals/voice")
     async def dashboard_voice_evals(limit: int = 100, silent_after_ms: int = 2500, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
@@ -659,6 +711,13 @@ def create_app(registry: SessionRegistry | None = None) -> FastAPI:
         result = await asyncio.to_thread(session.ask, payload.transcript)
         await sessions.events.publish("agent.responded", session_id=payload.call_id, intent=result["intent"], text=result["spoken"])
         return {"accepted": True, "call_id": payload.call_id, "answer": result["spoken"], "intent": result["intent"]}
+
+    dashboard_static = Path(os.getenv("DASHBOARD_STATIC_DIR", "/app/dashboard"))
+    if dashboard_static.is_dir():
+        # Same-origin serving keeps the mobile dashboard and voice API behind
+        # the existing TLS endpoint. The UI still asks the operator for a key
+        # at runtime; no secret is compiled into these static assets.
+        app.mount("/dashboard", StaticFiles(directory=dashboard_static, html=True), name="dashboard")
 
     return app
 

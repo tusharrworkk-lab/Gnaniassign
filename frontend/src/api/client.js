@@ -4,13 +4,20 @@
 const configuredBaseUrl = import.meta.env.VITE_AGENT_API_URL || "";
 const API_BASE_URL = configuredBaseUrl.replace(/\/$/, "");
 const API_KEY = import.meta.env.VITE_AGENT_API_KEY || "";
+const SAME_ORIGIN = import.meta.env.VITE_DASHBOARD_SAME_ORIGIN === "true";
+const SESSION_KEY = "relay.dashboard.api-key";
+
+function activeApiKey() {
+  return API_KEY || (typeof window === "undefined" ? "" : window.sessionStorage.getItem(SESSION_KEY) || "");
+}
 
 function headers() {
-  return API_KEY ? { "X-API-Key": API_KEY } : {};
+  const key = activeApiKey();
+  return key ? { "X-API-Key": key } : {};
 }
 
 async function request(path, options = {}) {
-  if (!API_BASE_URL) throw new Error("Set VITE_AGENT_API_URL to connect this dashboard.");
+  if (!API_BASE_URL && !SAME_ORIGIN) throw new Error("Set VITE_AGENT_API_URL to connect this dashboard.");
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
     headers: { ...headers(), ...(options.headers || {}) },
@@ -22,7 +29,18 @@ async function request(path, options = {}) {
   return response.json();
 }
 
-export const dashboardApiConfigured = Boolean(API_BASE_URL);
+export const dashboardApiConfigured = Boolean(API_BASE_URL) || SAME_ORIGIN;
+
+export function hasDashboardAccess() {
+  return Boolean(activeApiKey());
+}
+
+export function saveDashboardAccessKey(key) {
+  if (typeof window === "undefined") return;
+  const clean = key.trim();
+  if (clean) window.sessionStorage.setItem(SESSION_KEY, clean);
+  else window.sessionStorage.removeItem(SESSION_KEY);
+}
 
 export async function fetchHealth() {
   if (!API_BASE_URL) return { status: "demo" };
@@ -31,6 +49,18 @@ export async function fetchHealth() {
 
 export function fetchPromptPlan() {
   return request("/v1/dashboard/prompt-plan");
+}
+
+export function fetchDashboardOverview() {
+  return request("/v1/dashboard/overview?limit=30");
+}
+
+export function reviewIntent(observationId, intent) {
+  return request(`/v1/dashboard/intent-reviews/${encodeURIComponent(observationId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ intent }),
+  });
 }
 
 export function appendPromptNode({ instruction, priority = 100, condition = {} }) {
@@ -116,6 +146,9 @@ export const dashboardDemo = {
     started: "01:42",
     transcript: "Mujhe kal subah Riya ko call karna yaad dila dena.",
     state: "Listening",
+    live: true,
+    nextAction: "Tomorrow · 09:00",
+    outcome: "Reminder draft ready",
   },
   today: { calls: 18, resolved: 15, review: 3, quality: "94%" },
   reviews: [
