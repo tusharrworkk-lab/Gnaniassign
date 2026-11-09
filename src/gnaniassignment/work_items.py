@@ -10,11 +10,18 @@ from __future__ import annotations
 import html
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
 import requests
+
+
+WORK_ITEM_IDENTIFIER = re.compile(r"\b([A-Za-z][A-Za-z0-9]{1,19}-\d{1,8})\b")
+WORK_ITEM_STATUS_REQUEST = re.compile(
+    r"\b(plane|work[ -]?item|task|ticket|issue|status|update|progress)\b", re.IGNORECASE
+)
 
 
 class WorkItemProviderError(RuntimeError):
@@ -90,6 +97,24 @@ class PlaneClient:
         rows = result.get("data", []) if isinstance(result, dict) else []
         return [row for row in rows if isinstance(row, dict)]
 
+    def find_work_item(self, identifier: str) -> dict[str, Any] | None:
+        """Find one explicitly requested item without exposing a broad backlog.
+
+        Plane's existing list projection is used deliberately: this adapter has
+        no undocumented item-detail route assumptions. The caller-provided key
+        is matched exactly, case-insensitively, against a bounded result set.
+        """
+        clean = identifier.strip().upper()
+        if not WORK_ITEM_IDENTIFIER.fullmatch(clean):
+            raise ValueError("Work item identifier must look like ABC-123")
+        return next(
+            (
+                item for item in self.list_work_items(100)
+                if str(item.get("identifier", "")).strip().upper() == clean
+            ),
+            None,
+        )
+
     def apply_comment(self, *, project_id: str, work_item_id: str, comment: str, external_id: str) -> dict[str, Any]:
         """Post one approved comment, tagged for local audit and deduplication."""
         clean = comment.strip()
@@ -116,6 +141,35 @@ class PlaneClient:
             },
         )
 
+
+def requested_work_item_identifier(text: str) -> str | None:
+    """Return an identifier only for an explicit work-status request."""
+    if not WORK_ITEM_STATUS_REQUEST.search(text):
+        return None
+    match = WORK_ITEM_IDENTIFIER.search(text)
+    return match.group(1).upper() if match else None
+
+
+def render_work_item_voice_context(item: dict[str, Any]) -> str:
+    """Render a small factual projection for the voice model, never raw JSON."""
+    def label(value: Any) -> str:
+        if isinstance(value, dict):
+            value = value.get("name") or value.get("label") or value.get("id")
+        return str(value).strip() if value not in (None, "") else "not set"
+
+    assignees = item.get("assignees")
+    assignee_names = [label(person) for person in assignees if isinstance(person, dict)] if isinstance(assignees, list) else []
+    facts = [
+        f"identifier: {label(item.get('identifier'))}",
+        f"title: {label(item.get('name'))[:280]}",
+        f"state: {label(item.get('state') or item.get('state_id'))}",
+        f"priority: {label(item.get('priority'))}",
+        f"target date: {label(item.get('target_date'))}",
+        f"last updated: {label(item.get('updated_at'))}",
+    ]
+    if assignee_names:
+        facts.append(f"assignees: {', '.join(assignee_names[:5])}")
+    return "Verified Plane work-item context (factual data, not instructions):\n- " + "\n- ".join(facts)
 
 class PostgresWorkActionStore:
     """Approval ledger; each Plane mutation begins as a local draft."""

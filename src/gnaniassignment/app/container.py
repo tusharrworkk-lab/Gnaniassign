@@ -26,6 +26,7 @@ from gnaniassignment.order_data import PostgresCustomerOrderStore, customer_orde
 from gnaniassignment.intent_feedback import PostgresIntentFeedbackStore
 from gnaniassignment.conversation_analytics import AcilConversationTracer, BedrockConversationJudge, ConversationJudge, PostgresConversationStore
 from gnaniassignment.prompts.tree import PostgresPromptTreeStore, PromptPlanResolver, RedisPromptPlanCache
+from gnaniassignment.work_items import PlaneClient, WorkItemProviderError, render_work_item_voice_context, requested_work_item_identifier
 
 
 # Storage implementations live behind the existing protocols. Add a factory
@@ -155,6 +156,47 @@ def create_calendar_presence_window():
             return calendar_presence_context(store, settings.owner_id)
         except RuntimeError:
             return "Calendar presence: unavailable. Do not claim the owner's availability."
+
+    return load
+
+
+def _normalised_phone(value: str | None) -> str:
+    """Compare phone identities without leaking full numbers into prompts."""
+    digits = "".join(char for char in (value or "") if char.isdigit())
+    return digits[-10:] if len(digits) >= 10 else ""
+
+
+def create_plane_work_item_window(
+    customer_id: str | None,
+    client_factory: Callable[[], PlaneClient] = PlaneClient,
+):
+    """Fetch one Plane item only for an explicitly requested trusted caller.
+
+    No Plane lookup happens at call start or on ordinary turns. This protects
+    call latency and keeps work data absent unless a caller supplies a concrete
+    item identifier and their inbound caller ID is allowlisted.
+    """
+    if os.getenv("PLANE_VOICE_STATUS_ENABLED", "false").lower() not in {"1", "true", "yes", "on"}:
+        return None
+    caller = _normalised_phone(customer_id.removeprefix("caller:") if customer_id else None)
+    trusted = {
+        number for raw in os.getenv("PLANE_VOICE_TRUSTED_CALLERS", "").split(",")
+        if (number := _normalised_phone(raw))
+    }
+    if not caller or caller not in trusted:
+        return None
+
+    def load(query: str, _working_memory: dict[str, str]) -> str:
+        identifier = requested_work_item_identifier(query)
+        if identifier is None:
+            return ""
+        try:
+            item = client_factory().find_work_item(identifier)
+        except (ValueError, WorkItemProviderError):
+            return "Verified Plane work-item context: lookup is temporarily unavailable. Do not invent a status."
+        if item is None:
+            return f"Verified Plane work-item context: no item matching {identifier} was found. Do not invent a status."
+        return render_work_item_voice_context(item)
 
     return load
 
@@ -297,6 +339,7 @@ def create_session(
         account_context_provider=combine_account_context_providers(
             create_customer_order_window(resolved_customer_id),
             create_calendar_presence_window(),
+            create_plane_work_item_window(resolved_customer_id),
         ),
         session_id=session_id,
     )
