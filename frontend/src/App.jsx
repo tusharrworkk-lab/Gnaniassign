@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { appendPromptNode, createHarnessConversation, createGoogleCalendarConnectUrl, dashboardApiConfigured, dashboardDemo, disconnectGoogleCalendar, endHarnessConversation, fetchDashboardOverview, fetchGoogleCalendarStatus, fetchHarnessConversation, fetchPromptPlan, hasDashboardAccess, reviewIntent, saveDashboardAccessKey, sendHarnessTurn, streamRuntimeEvents } from "./api/client";
+import { appendPromptNode, createHarnessConversation, createGoogleCalendarConnectUrl, dashboardApiConfigured, dashboardDemo, disconnectGoogleCalendar, endHarnessConversation, fetchDashboardCall, fetchDashboardOverview, fetchGoogleCalendarStatus, fetchHarnessConversation, fetchPromptPlan, hasDashboardAccess, reviewIntent, saveDashboardAccessKey, sendHarnessTurn, streamRuntimeEvents } from "./api/client";
 
 const iconPaths = {
   home: <><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1Z" /></>,
@@ -49,6 +49,8 @@ function App() {
   const [overview, setOverview] = useState(null);
   const [overviewState, setOverviewState] = useState(dashboardApiConfigured ? "loading" : "demo");
   const [dashboardAccess, setDashboardAccess] = useState(() => hasDashboardAccess());
+  const [callDetail, setCallDetail] = useState(null);
+  const [callDetailState, setCallDetailState] = useState("idle");
   const reviewTriggerRef = useRef(null);
   const refreshOverview = async () => {
     if (!dashboardApiConfigured || !dashboardAccess) return;
@@ -105,6 +107,17 @@ function App() {
   const closeReview = () => {
     setSelectedReview(null);
     requestAnimationFrame(() => reviewTriggerRef.current?.focus());
+  };
+  const openCall = async (sessionId) => {
+    if (!dashboardApiConfigured) return;
+    setCallDetailState("loading");
+    try {
+      setCallDetail(await fetchDashboardCall(sessionId));
+      setCallDetailState("ready");
+    } catch (error) {
+      setCallDetailState("error");
+      setNotice(`Could not load this call: ${error.message}`);
+    }
   };
   const markReviewed = async (id, label) => {
     if (dashboardApiConfigured) {
@@ -193,7 +206,7 @@ function App() {
           </section>
         </>}
 
-        {activeTab === "calls" && <CallsView recent={dashboard.recent} events={runtimeEvents} feedState={feedState} />}
+        {activeTab === "calls" && <CallsView conversations={dashboard.conversations} events={runtimeEvents} feedState={feedState} detail={callDetail} detailState={callDetailState} onOpen={openCall} onClose={() => { setCallDetail(null); setCallDetailState("idle"); }} />}
         {activeTab === "review" && <ReviewView reviews={pendingReviews} onOpen={openReview} />}
         {activeTab === "settings" && <SettingsView
           instructionNodes={instructionNodes}
@@ -243,7 +256,7 @@ function dashboardFromOverview(overview, runtimeEvents, state) {
     return {
       agent: { name: "Relay", state: state === "error" ? "Unavailable" : "Connecting" },
       activeCall: { caller: "No active call", started: "—", state: "Waiting", transcript: "Live call details will appear when a caller connects.", live: false, nextAction: "—", outcome: "No action pending" },
-      today: { calls: "—", quality: "—", review: "—" }, reviews: [], recent: [],
+      today: { calls: "—", quality: "—", review: "—" }, reviews: [], recent: [], conversations: [],
     };
   }
   const calls = Array.isArray(overview.calls) ? overview.calls : [];
@@ -280,6 +293,13 @@ function dashboardFromOverview(overview, runtimeEvents, state) {
       outcome: call.metrics?.agent_failed ? "Needs review" : call.metrics?.call_ended ? "Resolved" : "In progress",
       time: relativeTime(call.updated_at),
     })),
+    conversations: Array.isArray(overview.conversations) ? overview.conversations.map((call) => ({
+      id: call.session_id,
+      name: callerLabel(call.customer_id),
+      topic: call.last_intent ? String(call.last_intent).replaceAll("_", " ") : `${call.turn_count || 0} turn${call.turn_count === 1 ? "" : "s"}`,
+      outcome: call.judge_status === "completed" ? "Reviewed" : call.judge_status === "failed" ? "Needs review" : "Recorded",
+      time: relativeTime(call.ended_at || call.created_at),
+    })) : [],
   };
 }
 
@@ -301,7 +321,18 @@ function relativeTime(value) {
 
 function ReviewPreview({ item, onOpen }) { return <button className="review-preview" onClick={onOpen}><div><span className="intent-label">Candidate · {item.intent.replace('_', ' ')}</span><p>{item.text}</p></div><div className="confidence"><strong>{item.confidence}</strong><span>confidence</span></div><Icon name="chevron" size={17} /></button>; }
 function ReviewView({ reviews, onOpen }) { return <section className="tab-page"><h2>Candidate labels</h2><p className="page-intro">These are MiniLM suggestions. A review never retrains the model automatically.</p>{reviews.length ? <div className="review-list">{reviews.map((item) => <ReviewPreview key={item.id} item={item} onOpen={(event) => onOpen(item, event)} />)}</div> : <div className="empty-state"><Icon name="check" size={24} /><h3>Queue cleared</h3><p>Your next nightly batch will appear here after classification.</p></div>}</section>; }
-function CallsView({ recent, events, feedState }) { return <section className="tab-page activity-page"><div className="activity-heading"><div><h2>Live activity</h2><p className="page-intro">Transcript, response, and shadow-classifier events from this running API process.</p></div><StatusPill tone={feedState === "live" ? "mint" : "slate"}>{feedState === "live" ? "Live feed" : feedState === "connecting" ? "Connecting" : "Preview"}</StatusPill></div>{events.length ? <div className="event-list" aria-live="polite">{events.map((event, index) => <article className="event-row" key={`${event.at}-${index}`}><span className={`event-dot ${event.kind.split(".")[0]}`} /><div><strong>{runtimeEventTitle(event)}</strong><p>{runtimeEventDetail(event)}</p></div><time>{new Date(event.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></article>)}</div> : <div className="event-empty"><Icon name="refresh" size={21} /><strong>{feedState === "connecting" ? "Waiting for the runtime" : "No live events yet"}</strong><p>Start a call or submit a turn; its transcript and MiniLM shadow result will appear here.</p></div>}<div className="activity-divider" /><h3 className="activity-subhead">Recent calls</h3><div className="call-list">{recent.length ? recent.map((call) => <article key={call.id || `${call.name}-${call.time}`} className="call-row"><div className="avatar">{call.name[0]}</div><div><strong>{call.name}</strong><span>{call.topic}</span></div><time>{call.time}</time><StatusPill tone={call.outcome === 'Resolved' ? 'mint' : 'amber'}>{call.outcome}</StatusPill></article>) : <div className="event-empty"><strong>No recorded calls yet</strong><p>Completed calls will appear here after the first VoiceLink session ends.</p></div>}</div></section>; }
+function CallsView({ conversations, events, feedState, detail, detailState, onOpen, onClose }) {
+  if (detail || detailState === "loading") return <CallDetailView detail={detail} loading={detailState === "loading"} onClose={onClose} />;
+  return <section className="tab-page activity-page"><div className="activity-heading"><div><h2>Live activity</h2><p className="page-intro">Transcript, response, and shadow-classifier events from this running API process.</p></div><StatusPill tone={feedState === "live" ? "mint" : "slate"}>{feedState === "live" ? "Live feed" : feedState === "connecting" ? "Connecting" : "Preview"}</StatusPill></div>{events.length ? <div className="event-list" aria-live="polite">{events.map((event, index) => <article className="event-row" key={`${event.at}-${index}`}><span className={`event-dot ${event.kind.split(".")[0]}`} /><div><strong>{runtimeEventTitle(event)}</strong><p>{runtimeEventDetail(event)}</p></div><time>{new Date(event.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></article>)}</div> : <div className="event-empty"><Icon name="refresh" size={21} /><strong>{feedState === "connecting" ? "Waiting for the runtime" : "No live events yet"}</strong><p>Start a call or submit a turn; its transcript and MiniLM shadow result will appear here.</p></div>}<div className="activity-divider" /><h3 className="activity-subhead">Completed calls</h3><div className="call-list">{conversations.length ? conversations.map((call) => <button key={call.id} className="call-row call-row-button" onClick={() => onOpen(call.id)}><div className="avatar">{call.name[0]}</div><div><strong>{call.name}</strong><span>{call.topic}</span></div><time>{call.time}</time><StatusPill tone={call.outcome === "Reviewed" ? "mint" : "amber"}>{call.outcome}</StatusPill><Icon name="chevron" size={15} /></button>) : <div className="event-empty"><strong>No completed transcripts yet</strong><p>Calls appear here after they end and the private conversation ledger is saved.</p></div>}</div></section>;
+}
+
+function CallDetailView({ detail, loading, onClose }) {
+  if (loading) return <section className="tab-page"><button className="plain-link" onClick={onClose}>‹ Back to calls</button><div className="event-empty"><strong>Loading conversation…</strong><p>Reading the encrypted operator ledger.</p></div></section>;
+  const conversation = detail?.conversation;
+  const turns = conversation?.turns || [];
+  const evaluation = detail?.voice_evaluation || {};
+  return <section className="tab-page call-detail-view"><button className="plain-link" onClick={onClose}>‹ Back to calls</button><div className="activity-heading"><div><h2>Call conversation</h2><p className="page-intro">{callerLabel(conversation?.customer_id)} · {relativeTime(conversation?.ended_at || conversation?.created_at)}</p></div><StatusPill tone={conversation?.judge_status === "completed" ? "mint" : "slate"}>{conversation?.judge_status || "Recorded"}</StatusPill></div><div className="call-transcript">{turns.length ? turns.map((turn) => <article key={turn.turn_number} className="transcript-pair"><p className="transcript-user"><span>Caller</span>{turn.user}</p><p className="transcript-agent"><span>Relay</span>{turn.assistant}</p><small>{turn.final_intent || turn.classifier_intent || turn.routed_intent || "generic"}{turn.flow_flags?.length ? ` · ${turn.flow_flags.join(", ")}` : ""}</small></article>) : <div className="event-empty"><strong>No turn pairs were stored</strong><p>This call may predate conversation logging.</p></div>}</div><section className="turn-metrics"><h3>Voice evaluation</h3><p>First audio p50: {evaluation.first_audible_reply_proxy?.p50_ms ?? "—"} ms · silent turns: {evaluation.silent_turns ?? "—"}</p><p>Barge-in p50: {evaluation.barge_in_stop_latency?.p50_ms ?? "—"} ms</p></section></section>;
+}
 function SettingsView({ instructionNodes, setInstructionNodes, preCallTools, setPreCallTools, promptVersion, promptRuntimeEnabled, isLive, savingInstruction, onAddInstruction, onNotice }) {
   const [section, setSection] = useState("instructions");
   const [showEditor, setShowEditor] = useState(false);

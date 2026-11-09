@@ -356,16 +356,18 @@ def create_app(registry: SessionRegistry | None = None) -> FastAPI:
     async def dashboard_overview(limit: int = 20, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
         """Private dashboard projection from durable call and review records."""
         _require_api_key(x_api_key)
+        from gnaniassignment.conversation_analytics import PostgresConversationStore
         from gnaniassignment.intent_feedback import PostgresIntentFeedbackStore
         from gnaniassignment.telephony.evaluation import summarize_turns
         from gnaniassignment.telephony.latency import CallLatencyStore
         bounded = max(1, min(limit, 100))
         try:
             latency = CallLatencyStore()
-            calls, turns, reviews = await asyncio.gather(
+            calls, turns, reviews, conversations = await asyncio.gather(
                 asyncio.to_thread(latency.recent, bounded),
                 asyncio.to_thread(latency.recent_turns, min(500, bounded * 5)),
                 asyncio.to_thread(PostgresIntentFeedbackStore().pending, bounded),
+                asyncio.to_thread(PostgresConversationStore().recent_calls, bounded),
             )
         except (RuntimeError, ValueError) as error:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
@@ -380,6 +382,34 @@ def create_app(registry: SessionRegistry | None = None) -> FastAPI:
             },
             "calls": calls,
             "reviews": reviews,
+            "conversations": conversations,
+        }
+
+    @app.get("/v1/dashboard/calls/{session_id}")
+    async def dashboard_call_detail(session_id: str, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        """Private transcript and operational trace for one completed call."""
+        _require_api_key(x_api_key)
+        if not session_id or len(session_id) > 256:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid call session ID")
+        from gnaniassignment.conversation_analytics import PostgresConversationStore
+        from gnaniassignment.telephony.evaluation import summarize_turns
+        from gnaniassignment.telephony.latency import CallLatencyStore
+        try:
+            store = PostgresConversationStore()
+            latency = CallLatencyStore()
+            conversation, call_metrics, turns = await asyncio.gather(
+                asyncio.to_thread(store.call_detail, session_id),
+                asyncio.to_thread(latency.get, session_id),
+                asyncio.to_thread(latency.turns_for_stream, session_id),
+            )
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+        if conversation is None and call_metrics is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
+        return {
+            "conversation": conversation,
+            "call_metrics": call_metrics,
+            "voice_evaluation": summarize_turns(turns),
         }
 
     @app.post("/v1/dashboard/intent-reviews/{observation_id}")
