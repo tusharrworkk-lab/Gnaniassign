@@ -67,6 +67,18 @@ export function endHarnessConversation(conversationId) {
   });
 }
 
+export function fetchGoogleCalendarStatus() {
+  return request("/v1/integrations/google-calendar/status");
+}
+
+export function createGoogleCalendarConnectUrl() {
+  return request("/v1/integrations/google-calendar/connect");
+}
+
+export function disconnectGoogleCalendar() {
+  return request("/v1/integrations/google-calendar/disconnect", { method: "POST" });
+}
+
 // SSE is read with fetch rather than EventSource so a development API key can
 // be sent in a header. It automatically exits when its AbortSignal is aborted.
 export async function streamRuntimeEvents(onEvent, signal) {

@@ -41,6 +41,14 @@ The OAuth client must have this exact Authorized redirect URI in Google Cloud:
 https://voice.sidecut.me/v1/integrations/google-calendar/callback
 ```
 
+For a local-only OAuth test, add this second authorized redirect URI to the
+same OAuth client and set `GOOGLE_CALENDAR_REDIRECT_URI` to the exact same
+value locally:
+
+```text
+http://localhost:8080/v1/integrations/google-calendar/callback
+```
+
 ## Connect once
 
 Use the authenticated dashboard/API to obtain the Google consent link:
@@ -53,6 +61,10 @@ curl -H "X-API-Key: $AGENT_API_KEY" \
 Open the returned `authorization_url` in a browser and approve access. The
 callback saves an encrypted refresh token in PostgreSQL and immediately writes
 the first current-event snapshot.
+
+In the mobile dashboard, open **Setup → Tools → Connect Google Calendar** and
+complete Google's consent screen. The UI needs the same authenticated API
+connection as other dashboard controls.
 
 Check safe status (it never returns an event title or token):
 

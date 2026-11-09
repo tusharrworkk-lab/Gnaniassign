@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { appendPromptNode, createHarnessConversation, dashboardApiConfigured, dashboardDemo, endHarnessConversation, fetchHarnessConversation, fetchPromptPlan, sendHarnessTurn, streamRuntimeEvents } from "./api/client";
+import { appendPromptNode, createHarnessConversation, createGoogleCalendarConnectUrl, dashboardApiConfigured, dashboardDemo, disconnectGoogleCalendar, endHarnessConversation, fetchGoogleCalendarStatus, fetchHarnessConversation, fetchPromptPlan, sendHarnessTurn, streamRuntimeEvents } from "./api/client";
 
 const iconPaths = {
   home: <><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1Z" /></>,
@@ -198,7 +198,13 @@ function SettingsView({ instructionNodes, setInstructionNodes, preCallTools, set
   const [newInstruction, setNewInstruction] = useState("");
   const [showServer, setShowServer] = useState(false);
   const [serverName, setServerName] = useState("");
+  const [calendar, setCalendar] = useState(null);
+  const [calendarBusy, setCalendarBusy] = useState(false);
   const enabledCount = preCallTools.filter((tool) => tool.enabled).length;
+  useEffect(() => {
+    if (section !== "mcp" || !isLive) return;
+    fetchGoogleCalendarStatus().then(setCalendar).catch((error) => setCalendar({ error: error.message }));
+  }, [section, isLive]);
   const addInstruction = async () => {
     const instruction = newInstruction.trim();
     if (!instruction) return;
@@ -215,7 +221,7 @@ function SettingsView({ instructionNodes, setInstructionNodes, preCallTools, set
       <button role="tab" aria-selected={section === "instructions"} className={section === "instructions" ? "selected" : ""} onClick={() => setSection("instructions")}><Icon name="branch" size={17} />Instructions</button>
       <button role="tab" aria-selected={section === "voice"} className={section === "voice" ? "selected" : ""} onClick={() => setSection("voice")}><Icon name="sliders" size={17} />Voice</button>
       <button role="tab" aria-selected={section === "memory"} className={section === "memory" ? "selected" : ""} onClick={() => setSection("memory")}><Icon name="database" size={17} />Memory</button>
-      <button role="tab" aria-selected={section === "mcp"} className={section === "mcp" ? "selected" : ""} onClick={() => setSection("mcp")}><Icon name="plug" size={17} />MCP prep</button>
+      <button role="tab" aria-selected={section === "mcp"} className={section === "mcp" ? "selected" : ""} onClick={() => setSection("mcp")}><Icon name="plug" size={17} />Tools</button>
       <button role="tab" aria-selected={section === "harness"} className={section === "harness" ? "selected" : ""} onClick={() => setSection("harness")}><Icon name="message" size={17} />Test chat</button>
     </div>
     {section === "instructions" ? <>
@@ -224,12 +230,48 @@ function SettingsView({ instructionNodes, setInstructionNodes, preCallTools, set
       <div className="instruction-list">{instructionNodes.map((node, index) => <article className="instruction-row" key={node.id}><div className="instruction-order">{index + 1}</div><div><strong>{node.name}</strong><small>{node.detail}</small><p>{node.instruction}</p></div><button className="row-icon" aria-label={`View ${node.name}`} onClick={() => onNotice(node.instruction)}><Icon name="eye" size={17} /></button></article>)}</div>
       {showEditor ? <div className="inline-editor"><label htmlFor="instruction">New instruction</label><textarea id="instruction" value={newInstruction} onChange={(event) => setNewInstruction(event.target.value)} placeholder="Tell Relay exactly how to respond in this situation" /><div><button className="change-button" onClick={() => setShowEditor(false)} disabled={savingInstruction}>Cancel</button><button className="compact-primary" onClick={addInstruction} disabled={savingInstruction}>{savingInstruction ? "Publishing…" : "Add rule"}</button></div></div> : <button className="outline-action" onClick={() => setShowEditor(true)}><Icon name="plus" size={18} />Add instruction</button>}
     </> : section === "voice" ? <VoiceControls onNotice={onNotice} /> : section === "memory" ? <MemoryControls onAddInstruction={onAddInstruction} savingInstruction={savingInstruction} isLive={isLive} onNotice={onNotice} /> : section === "mcp" ? <>
+      <CalendarConnection
+        status={calendar}
+        busy={calendarBusy}
+        onConnect={async () => {
+          setCalendarBusy(true);
+          try {
+            const result = await createGoogleCalendarConnectUrl();
+            window.location.assign(result.authorization_url);
+          } catch (error) {
+            onNotice(`Could not start Google Calendar connection: ${error.message}`);
+            setCalendarBusy(false);
+          }
+        }}
+        onDisconnect={async () => {
+          setCalendarBusy(true);
+          try {
+            await disconnectGoogleCalendar();
+            setCalendar({ enabled: true, connected: false, presence: null });
+            onNotice("Google Calendar disconnected.");
+          } catch (error) { onNotice(`Could not disconnect calendar: ${error.message}`); }
+          finally { setCalendarBusy(false); }
+        }}
+      />
       <section className="setup-hero mcp-hero" aria-labelledby="pre-call-readiness"><div className="setup-hero-mark"><Icon name="database" size={21} /></div><div><h3 id="pre-call-readiness">Pre-call readiness</h3><p>{enabledCount} read-only source{enabledCount === 1 ? "" : "s"} prepare caller context</p></div><span>Ready</span></section>
       <p className="safe-note"><Icon name="shield" size={16} />Only approved read-only tools run before a call. The browser never receives credentials.</p>
       <section className="mcp-connection"><div className="connection-top"><div><span>Remote MCP server</span><strong>Customer context gateway</strong><small>Streamable HTTP · token stored server-side</small></div><StatusPill>Connected</StatusPill></div><button className="plain-link" onClick={() => onNotice("Tool discovery will run from the backend after the MCP configuration API is connected.")}>Refresh tool list <Icon name="refresh" size={16} /></button></section>
       <div className="tool-list">{preCallTools.map((tool) => <article className="tool-row" key={tool.id}><div className="tool-icon"><Icon name={tool.icon} size={18} /></div><div><strong>{tool.name}</strong><small>{tool.description}</small><em>{tool.scope}</em></div><button className={`tool-toggle ${tool.enabled ? "on" : ""}`} aria-pressed={tool.enabled} aria-label={`${tool.enabled ? "Disable" : "Enable"} ${tool.name} before calls`} onClick={() => toggleTool(tool.id)}><i /></button></article>)}</div>
       {showServer ? <div className="inline-editor"><label htmlFor="server">Server name</label><input id="server" value={serverName} onChange={(event) => setServerName(event.target.value)} placeholder="e.g. CRM context" /><small>Endpoint and secret reference are saved by the backend, not this WebView.</small><div><button className="change-button" onClick={() => setShowServer(false)}>Cancel</button><button className="compact-primary" onClick={addServer}>Save server</button></div></div> : <button className="outline-action" onClick={() => setShowServer(true)}><Icon name="plus" size={18} />Add MCP server</button>}
     </> : <HarnessView />}
+  </section>;
+}
+
+function CalendarConnection({ status, busy, onConnect, onDisconnect }) {
+  const connected = Boolean(status?.connected);
+  const statusText = status?.error ? "Unavailable" : connected ? "Connected" : status?.enabled === false ? "Not configured" : "Not connected";
+  return <section className="mcp-connection calendar-connection" aria-labelledby="calendar-title">
+    <div className="connection-top">
+      <div><span>Google Calendar</span><strong id="calendar-title">Current availability</strong><small>{connected && status?.presence?.status === "busy" ? `Busy until ${new Date(status.presence.busy_until).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : connected ? "Connected · presence refreshed in background" : "Read-only · only current busy status enters call context"}</small></div>
+      <StatusPill tone={connected ? "mint" : "slate"}>{statusText}</StatusPill>
+    </div>
+    {status?.error && <p className="page-intro">{status.error}</p>}
+    {connected ? <button className="plain-link" onClick={onDisconnect} disabled={busy}>{busy ? "Disconnecting…" : "Disconnect calendar"}</button> : <button className="compact-primary" onClick={onConnect} disabled={busy || status?.enabled === false}>{busy ? "Opening Google…" : "Connect Google Calendar"}</button>}
   </section>;
 }
 

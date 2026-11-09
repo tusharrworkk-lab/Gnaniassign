@@ -16,7 +16,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import requests
 
@@ -56,8 +56,11 @@ class GoogleCalendarSettings:
         missing = [name for name in ("client_id", "client_secret", "token_encryption_key", "state_secret") if not values[name]]
         if missing:
             raise ValueError("Set " + ", ".join(f"GOOGLE_CALENDAR_{name.upper()}" for name in missing) + " to enable Google Calendar")
-        if not values["redirect_uri"].startswith("https://"):
-            raise ValueError("GOOGLE_CALENDAR_REDIRECT_URI must use HTTPS")
+        redirect_uri = urlparse(values["redirect_uri"])
+        local_hosts = {"localhost", "127.0.0.1", "::1"}
+        local_development_redirect = redirect_uri.scheme == "http" and redirect_uri.hostname in local_hosts
+        if redirect_uri.scheme != "https" and not local_development_redirect:
+            raise ValueError("GOOGLE_CALENDAR_REDIRECT_URI must use HTTPS (except localhost during development)")
         return cls(**values)
 
 

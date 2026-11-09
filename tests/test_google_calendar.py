@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
+from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 
@@ -62,6 +63,16 @@ class GoogleCalendarTests(unittest.TestCase):
         state = parse_qs(urlparse(client.authorization_url()).query)["state"][0]
         with self.assertRaises(CalendarIntegrationError):
             client.verify_state(state[:-1] + ("a" if state[-1] != "a" else "b"))
+
+    def test_localhost_callback_is_allowed_only_for_development(self):
+        with patch.dict("os.environ", {
+            "GOOGLE_CALENDAR_CLIENT_ID": "client",
+            "GOOGLE_CALENDAR_CLIENT_SECRET": "secret",
+            "GOOGLE_CALENDAR_TOKEN_ENCRYPTION_KEY": Fernet.generate_key().decode(),
+            "GOOGLE_CALENDAR_STATE_SECRET": "state-secret",
+            "GOOGLE_CALENDAR_REDIRECT_URI": "http://localhost:8080/v1/integrations/google-calendar/callback",
+        }, clear=True):
+            self.assertTrue(GoogleCalendarSettings.from_environment().redirect_uri.startswith("http://localhost"))
 
     def test_current_event_ignores_transparent_and_returns_only_active_event(self):
         session = Session([
