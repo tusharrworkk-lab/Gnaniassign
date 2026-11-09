@@ -246,6 +246,7 @@ def create_session(
     retriever: IntentScopedRetriever | EmptyRetriever | None = None,
     knowledge: str = "No approved knowledge has been loaded yet.",
     customer_id: str | None = None,
+    session_id: str | None = None,
     shadow_observer: Callable[[dict], None] | None = None,
     shadow_error_observer: Callable[[Exception], None] | None = None,
 ) -> TurnSession:
@@ -297,4 +298,5 @@ def create_session(
             create_customer_order_window(resolved_customer_id),
             create_calendar_presence_window(),
         ),
+        session_id=session_id,
     )

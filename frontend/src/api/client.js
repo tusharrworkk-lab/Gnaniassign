@@ -55,6 +55,10 @@ export function fetchDashboardOverview() {
   return request("/v1/dashboard/overview?limit=30");
 }
 
+export function fetchDashboardCall(sessionId) {
+  return request(`/v1/dashboard/calls/${encodeURIComponent(sessionId)}`);
+}
+
 export function reviewIntent(observationId, intent) {
   return request(`/v1/dashboard/intent-reviews/${encodeURIComponent(observationId)}`, {
     method: "POST",
@@ -160,4 +164,5 @@ export const dashboardDemo = {
     { name: "Priya S.", topic: "Callback request", outcome: "Resolved", time: "10:14" },
     { name: "Unknown caller", topic: "Delivery address", outcome: "Needs review", time: "09:48" },
   ],
+  conversations: [],
 };

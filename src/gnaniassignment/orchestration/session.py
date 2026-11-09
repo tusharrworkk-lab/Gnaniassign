@@ -17,12 +17,15 @@ MAX_CALL_SUMMARY_CHARS = 900
 
 
 class TurnSession:
-    def __init__(self, graph: Any, memory_store: EpisodicMemoryStore | None = None, customer_id: str | None = None, conversation_store: PostgresConversationStore | None = None, tracer: AcilConversationTracer | None = None, call_judge: ConversationJudge | None = None, account_context_provider: Callable[[str, dict[str, str]], str] | None = None) -> None:
+    def __init__(self, graph: Any, memory_store: EpisodicMemoryStore | None = None, customer_id: str | None = None, conversation_store: PostgresConversationStore | None = None, tracer: AcilConversationTracer | None = None, call_judge: ConversationJudge | None = None, account_context_provider: Callable[[str, dict[str, str]], str] | None = None, session_id: str | None = None) -> None:
         self.graph: Any = graph
         self.phrases: list[str] = []
         self.memory_store = memory_store
         self.customer_id = customer_id
-        self.session_id = str(uuid4())
+        # Telephony adapters provide a durable provider stream ID. Reuse it so
+        # call metrics, transcripts, reviews and dashboard detail all share a
+        # single, queryable call identity.
+        self.session_id = session_id or str(uuid4())
         # Raw turns are retained in PostgreSQL for audit, but never replayed
         # wholesale to a new call.  A fresh call starts with a few concise,
         # completed-call summaries only.

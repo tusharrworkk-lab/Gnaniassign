@@ -535,7 +535,7 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                 tts = GnaniRealtimeTts()
                 await stt.__aenter__()
                 await tts.__aenter__()
-                call = VoiceLinkCall(websocket, stream_sid, call_sid, caller_id, customer_id, stt, tts, create_session(customer_id=customer_id))
+                call = VoiceLinkCall(websocket, stream_sid, call_sid, caller_id, customer_id, stt, tts, create_session(customer_id=customer_id, session_id=stream_sid))
                 call.events = events
                 call.audio_enhancer = create_audio_enhancer(call.stt.sample_rate)
                 # New generic settings supersede the legacy Silero-only

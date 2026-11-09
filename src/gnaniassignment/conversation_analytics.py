@@ -169,6 +169,69 @@ class PostgresConversationStore:
                 (final_intent, turn_id),
             )
 
+    def recent_calls(self, limit: int = 30) -> list[dict[str, Any]]:
+        """Compact, owner-only call index; full transcript needs a detail read."""
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT session_id, customer_id, transcript, judge_status, created_at, ended_at
+                FROM conversation_calls
+                ORDER BY COALESCE(ended_at, created_at) DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            result = []
+            for session_id, customer_id, transcript, judge_status, created_at, ended_at in cursor.fetchall():
+                turns = transcript if isinstance(transcript, list) else []
+                last = turns[-1] if turns and isinstance(turns[-1], dict) else {}
+                result.append({
+                    "session_id": session_id,
+                    "customer_id": customer_id,
+                    "turn_count": len(turns),
+                    "last_intent": last.get("routed_intent"),
+                    "judge_status": judge_status,
+                    "created_at": created_at.isoformat(),
+                    "ended_at": ended_at.isoformat() if ended_at else None,
+                })
+            return result
+
+    def call_detail(self, session_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT session_id, customer_id, stt_segments, transcript, judge_status, judge_result, created_at, ended_at
+                FROM conversation_calls WHERE session_id = %s
+                """,
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            cursor.execute(
+                """
+                SELECT turn_number, user_text, response_text, routed_intent, classifier_intent,
+                       classifier_confidence, final_intent, flow_flags, flow_status, created_at
+                FROM conversation_turns WHERE session_id = %s ORDER BY turn_number
+                """,
+                (session_id,),
+            )
+            turns = [
+                {
+                    "turn_number": item[0], "user": item[1], "assistant": item[2],
+                    "routed_intent": item[3], "classifier_intent": item[4],
+                    "classifier_confidence": item[5], "final_intent": item[6],
+                    "flow_flags": item[7], "flow_status": item[8], "created_at": item[9].isoformat(),
+                }
+                for item in cursor.fetchall()
+            ]
+        return {
+            "session_id": row[0], "customer_id": row[1], "stt_segments": row[2],
+            "transcript": row[3], "judge_status": row[4], "judge_result": row[5],
+            "created_at": row[6].isoformat(), "ended_at": row[7].isoformat() if row[7] else None,
+            "turns": turns,
+        }
+
     def finalize_call(self, session_id: str, customer_id: str | None, stt_segments: list[dict[str, Any]], transcript: list[dict[str, Any]], judge_result: dict[str, Any] | None) -> None:
         status = "failed" if judge_result and "judge_error" in judge_result else "completed" if judge_result is not None else "not_requested"
         with self._connect() as connection, connection.cursor() as cursor:
