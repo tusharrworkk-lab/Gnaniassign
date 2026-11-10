@@ -66,6 +66,8 @@ class VoiceLinkCall:
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     inbound_packets: int = 0
     outbound_buffer: bytearray = field(default_factory=bytearray)
+    outbound_next_frame_at: float | None = None
+    outbound_last_frame_at: float | None = None
     started_at: float = field(default_factory=time.perf_counter)
     latency_store: CallLatencyStore | None = None
     reply_in_progress: bool = False
@@ -216,26 +218,47 @@ class VoiceLinkCall:
     async def _send_outbound_frame(self, alaw: bytes) -> None:
         if self.reply_interrupted.is_set():
             return
+        # VoiceLink expects telephony audio in 20 ms A-law packets. Pace from
+        # a monotonic deadline instead of sleeping *after* send: that avoids
+        # bursts when the event loop is delayed and gives us a real jitter
+        # measurement for carrier-quality debugging.
+        if len(alaw) != VOICE_LINK_FRAME_BYTES:
+            raise ValueError("VoiceLink outbound frames must be exactly 160 bytes / 20 ms")
+        if self.outbound_next_frame_at is not None:
+            wait_seconds = self.outbound_next_frame_at - time.perf_counter()
+            if wait_seconds > 0:
+                await asyncio.sleep(wait_seconds)
         async with self.send_lock:
-            await self.websocket.send_json({"event": "media", "media": {"payload": base64.b64encode(alaw).decode("ascii")}})
+            await self.websocket.send_json({
+                "event": "media", "stream_sid": self.stream_sid,
+                "media": {"payload": base64.b64encode(alaw).decode("ascii")},
+            })
+        sent_at = time.perf_counter()
+        self.outbound_next_frame_at = sent_at + 0.02
         # This measures that our server handed a frame to the WebSocket.  It
         # is deliberately *not* labelled "played": VoiceLink's documented
         # media/mark events do not acknowledge handset playback.
         if self._active_reply_metrics is not None:
             now_ms = self.elapsed_ms()
+            if self.outbound_last_frame_at is not None:
+                gap_ms = round((sent_at - self.outbound_last_frame_at) * 1000, 1)
+                self._active_reply_metrics["outbound_max_frame_gap_ms"] = max(
+                    float(self._active_reply_metrics.get("outbound_max_frame_gap_ms", 0)), gap_ms
+                )
+            self.outbound_last_frame_at = sent_at
             self._active_reply_metrics["outbound_frames_sent"] += 1
             self._active_reply_metrics["outbound_last_frame_sent_ms"] = now_ms
             self._active_reply_metrics.setdefault("outbound_first_frame_sent_ms", now_ms)
             if self._active_reply_metrics["outbound_frames_sent"] == 1:
                 self.note_first_outbound_audio()
                 await self.trace("tts.outbound_first_frame", reply_index=self.reply_count, elapsed_ms=now_ms)
-        # Preserve real-time audio cadence; sending a full TTS response as fast
-        # as the network allows causes carrier-side jitter/garbling.
-        await asyncio.sleep(0.02)
 
     async def flush_outbound(self) -> None:
         if self.outbound_buffer and not self.reply_interrupted.is_set():
-            frame = bytes(self.outbound_buffer)
+            # Never send a short terminal packet. A-law telephony gateways
+            # consume fixed 20 ms frames; zero-padding is silence and avoids
+            # a truncated/corrupted tail at sentence boundaries.
+            frame = bytes(self.outbound_buffer).ljust(VOICE_LINK_FRAME_BYTES, b"\xd5")
             self.outbound_buffer.clear()
             await self._send_outbound_frame(frame)
 
@@ -361,6 +384,12 @@ class VoiceLinkCall:
         if self.reply_interrupted.is_set():
             return
         self.reply_count += 1
+        # Each TTS request is independent speech separated by silence. Carrying
+        # resampler filter state across replies can create a click/glitch at a
+        # new response boundary, especially when a provider changes chunking.
+        self.output_resample_state = None
+        self.outbound_next_frame_at = None
+        self.outbound_last_frame_at = None
         reply_started = time.perf_counter()
         self._active_reply_metrics = {
             "reply_index": self.reply_count,
@@ -412,7 +441,10 @@ class VoiceLinkCall:
             # This outbound marker is optional for playback, but lets VoiceLink
             # correlate an agent response boundary using its documented schema.
             async with self.send_lock:
-                await self.websocket.send_json({"event": "mark", "mark": {"name": "response_done"}})
+                await self.websocket.send_json({
+                    "event": "mark", "stream_sid": self.stream_sid,
+                    "mark": {"name": "response_done"},
+                })
             self._active_reply_metrics["outbound_mark_sent_ms"] = round((time.perf_counter() - self.started_at) * 1000, 1)
             await self.metric(reply_count=self.reply_count, latest_reply=dict(self._active_reply_metrics))
             await self.trace("tts.completed", reply_index=self.reply_count, frames=self._active_reply_metrics["outbound_frames_sent"])

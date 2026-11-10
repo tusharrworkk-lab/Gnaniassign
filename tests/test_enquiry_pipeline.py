@@ -101,11 +101,13 @@ class PipelineTests(unittest.TestCase):
 
         messages, metrics = asyncio.run(run())
         reply = metrics[-1]["latest_reply"]
-        self.assertEqual(messages[-1], {"event": "mark", "mark": {"name": "response_done"}})
+        self.assertEqual(messages[-1], {"event": "mark", "stream_sid": "stream-1", "mark": {"name": "response_done"}})
         self.assertGreater(reply["outbound_frames_sent"], 0)
         self.assertIn("tts_first_audio_ms", reply)
         self.assertIn("outbound_first_frame_sent_ms", reply)
         self.assertIn("outbound_mark_sent_ms", reply)
+        media = next(message for message in messages if message["event"] == "media")
+        self.assertEqual(media["stream_sid"], "stream-1")
 
     def test_voicelink_retries_tts_when_provider_completes_with_no_audio(self):
         from gnaniassignment.telephony.voicelink import VoiceLinkCall
