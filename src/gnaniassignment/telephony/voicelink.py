@@ -22,7 +22,7 @@ from fastapi import WebSocket
 
 from gnaniassignment.app.container import create_session
 from gnaniassignment.stt.gnani import GnaniRealtimeStt
-from gnaniassignment.tts.gnani import GnaniRealtimeTts, GnaniTtsError, should_add_clear_throat
+from gnaniassignment.tts.gnani import GnaniRealtimeTts, GnaniTtsError
 from gnaniassignment.voice.events import VoiceError, VoiceTranscript
 from gnaniassignment.voice.audio_enhancement import AudioEnhancer, create_audio_enhancer
 from gnaniassignment.telephony.latency import CallLatencyStore
@@ -489,46 +489,72 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
         chunks: asyncio.Queue[str] = asyncio.Queue()
         loop = asyncio.get_running_loop()
         first_chunk_at: float | None = None
-        clear_throat_sent = False
+        clear_throat_started = False
 
-        def needs_clear_throat() -> bool:
-            if clear_throat_sent or first_chunk_at is None:
-                return False
+        async def play_proactive_clear_throat() -> bool:
+            """Play a tiny standalone cue only while the answer is pending.
+
+            This is intentionally a timer, not a decision made after the
+            first answer text arrives.  The caller hears the cue at the
+            configured delay, then the normal answer is synthesized unchanged.
+            """
+            nonlocal clear_throat_started
             if os.getenv("GNANI_TTS_POST_RESPONSE_CLEAR_THROAT_ENABLED", "false").lower() not in {"1", "true", "yes", "on"}:
                 return False
-            threshold_ms = float(os.getenv("GNANI_TTS_POST_RESPONSE_CLEAR_THROAT_MS", "500"))
-            return should_add_clear_throat((first_chunk_at - llm_started) * 1000, threshold_ms)
+            threshold_ms = max(0.0, float(os.getenv("GNANI_TTS_POST_RESPONSE_CLEAR_THROAT_MS", "600")))
+            await asyncio.sleep(threshold_ms / 1000)
+            if first_chunk_at is not None or generation.done() or call.reply_interrupted.is_set():
+                return False
+            clear_throat_started = True
+            await call.trace("tts.clear_throat", proactive=True, threshold_ms=threshold_ms)
+            await call.speak_reply("", add_clear_throat=True)
+            return True
 
         def on_chunk(chunk: str) -> None:
             loop.call_soon_threadsafe(chunks.put_nowait, chunk)
 
         generation = asyncio.create_task(asyncio.to_thread(call.session.ask_stream, stt_event.text, on_chunk))
+        clear_throat_task = asyncio.create_task(play_proactive_clear_throat())
         pending = ""
-        while not generation.done() or not chunks.empty():
+        try:
+            while not generation.done() or not chunks.empty():
+                try:
+                    chunk = await asyncio.wait_for(chunks.get(), timeout=0.05)
+                except asyncio.TimeoutError:
+                    continue
+                if first_chunk_at is None:
+                    first_chunk_at = time.perf_counter()
+                    call.note_llm_first_token()
+                    await call.metric(llm_ttft_ms=round((first_chunk_at-call.started_at)*1000,1))
+                    await call.trace("llm.first_token", ttft_ms=round((first_chunk_at - llm_started) * 1000, 1))
+                    # If the timer is still asleep it must never play later.
+                    # If it already started, finish the short cue before
+                    # sending words, preserving a clean telephony stream.
+                    if not clear_throat_started and not clear_throat_task.done():
+                        clear_throat_task.cancel()
+                    try:
+                        await clear_throat_task
+                    except asyncio.CancelledError:
+                        pass
+                pending += chunk
+                # Start audio at a natural sentence boundary, or cap the fragment
+                # so a slow model never becomes a voice note.
+                if any(mark in pending for mark in ".!?") or len(pending) >= 90:
+                    await call.speak_reply(pending.strip())
+                    pending = ""
+                    if call.reply_interrupted.is_set():
+                        outcome = "interrupted"
+                        break
+            result = await generation
+            if pending.strip() and not call.reply_interrupted.is_set():
+                await call.speak_reply(pending.strip())
+        finally:
+            if not clear_throat_task.done():
+                clear_throat_task.cancel()
             try:
-                chunk = await asyncio.wait_for(chunks.get(), timeout=0.05)
-            except asyncio.TimeoutError:
-                continue
-            if first_chunk_at is None:
-                first_chunk_at = time.perf_counter()
-                call.note_llm_first_token()
-                await call.metric(llm_ttft_ms=round((first_chunk_at-call.started_at)*1000,1))
-                await call.trace("llm.first_token", ttft_ms=round((first_chunk_at - llm_started) * 1000, 1))
-            pending += chunk
-            # Start audio at a natural sentence boundary, or cap the fragment
-            # so a slow model never becomes a voice note.
-            if any(mark in pending for mark in ".!?") or len(pending) >= 90:
-                add_clear_throat = needs_clear_throat()
-                await call.speak_reply(pending.strip(), add_clear_throat=add_clear_throat)
-                clear_throat_sent = clear_throat_sent or add_clear_throat
-                pending = ""
-                if call.reply_interrupted.is_set():
-                    outcome = "interrupted"
-                    break
-        result = await generation
-        if pending.strip() and not call.reply_interrupted.is_set():
-            add_clear_throat = needs_clear_throat()
-            await call.speak_reply(pending.strip(), add_clear_throat=add_clear_throat)
+                await clear_throat_task
+            except asyncio.CancelledError:
+                pass
         if call.reply_interrupted.is_set():
             outcome = "interrupted"
         await call.metric(llm_completed_ms=round((time.perf_counter()-call.started_at)*1000,1))

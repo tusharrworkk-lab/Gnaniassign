@@ -37,7 +37,12 @@ def decorate_tts_text(text: str, *, enabled: bool, model: str, add_clear_throat:
     # synthesized separately once generation completes.
     if latency_giggle:
         return "<giggle>"
+    # A proactive latency cue deliberately has no accompanying answer text.
+    # It is synthesized as a standalone request while the LLM is still
+    # working, never prepended to a reply that has already arrived.
     if not clean:
+        if add_clear_throat:
+            return "<clears throat>"
         return clean
     tags: list[str] = []
     # The post-response latency cue is application-controlled, never LLM
@@ -141,7 +146,7 @@ class GnaniRealtimeTts:
         return {"X-API-Key-ID": self.api_key, "Content-Type": "application/json"}
 
     def request(self, text: str, *, add_clear_throat: bool = False, latency_giggle: bool = False) -> dict[str, Any]:
-        if not text.strip():
+        if not text.strip() and not (add_clear_throat or latency_giggle):
             raise ValueError("TTS text must not be empty")
         rendered = decorate_tts_text(text, enabled=self.audio_tags, model=self.model, add_clear_throat=add_clear_throat, latency_giggle=latency_giggle)
         if not rendered:

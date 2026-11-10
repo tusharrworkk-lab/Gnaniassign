@@ -501,6 +501,12 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("<slow>", spoken)
         self.assertEqual(decorate_tts_text("Hello <giggle>", enabled=True, model="timbre-v2.5"), "Hello")
 
+    def test_clear_throat_can_be_a_standalone_proactive_cue(self):
+        self.assertEqual(
+            decorate_tts_text("", enabled=True, model="timbre-v3.0", add_clear_throat=True),
+            "<clears throat>",
+        )
+
     def test_clear_throat_is_a_deterministic_ttft_threshold(self):
         self.assertFalse(should_add_clear_throat(700))
         self.assertTrue(should_add_clear_throat(701))
