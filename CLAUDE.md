@@ -19,6 +19,10 @@ The product has two configurable personas built on the same voice core:
 For the full launch narrative, persona details, safety boundaries and video
 story ideas, read `docs/relay-launch-story.md`.
 
+For the complete chronological build history, migration decisions, incidents,
+tooling details, observed failure modes and prioritized backlog, read
+`docs/claude-handoff-full.md`.
+
 ## Repository and current state
 
 - Repository root: this directory.
