@@ -31,6 +31,7 @@ from gnaniassignment.telephony.latency import CallLatencyStore
 VOICE_LINK_SAMPLE_RATE = 8000
 PCM_WIDTH = 2
 VOICE_LINK_FRAME_BYTES = 160  # 20 ms: 8000 samples/s × 20 ms × 8-bit A-law
+VOICE_EVALUATION_SCHEMA_VERSION = 2
 logger = logging.getLogger(__name__)
 
 
@@ -101,30 +102,42 @@ class VoiceLinkCall:
         return round((time.perf_counter() - self.started_at) * 1000, 1)
 
     async def begin_turn_evaluation(self) -> None:
-        """Start a per-turn record. It deliberately contains no transcript/audio."""
+        """Start a per-turn record with unambiguous timing boundaries.
+
+        A VAD speech-end belongs to acoustic endpointing, while a provider
+        final belongs to transcript delivery.  The latter can arrive after a
+        newer speech segment has already started, so it must never be used as
+        the universal latency anchor.  The committed transcript is the one
+        reliable boundary shared by every turn source.
+        """
         self.turn_index += 1
         started = self.elapsed_ms()
         speech_end = self.last_speech_ended_ms
-        # VAD may be off in a controlled rollout. In that case provider-final
-        # is the best available turn boundary, and the source is recorded so
-        # dashboards never confuse it with a true acoustic end-of-speech.
-        anchor = speech_end if speech_end is not None else (self.last_turn_committed_ms or started)
+        committed = self.last_turn_committed_ms or started
         self.active_turn_evaluation = {
+            "evaluation_schema_version": VOICE_EVALUATION_SCHEMA_VERSION,
             "turn_index": self.turn_index,
             "speech_started_at_ms": self.last_speech_started_ms,
             "speech_ended_at_ms": speech_end,
-            "turn_committed_at_ms": self.last_turn_committed_ms or started,
-            "response_latency_anchor_at_ms": anchor,
-            "response_latency_anchor": "speech_end" if speech_end is not None else "turn_committed",
+            "turn_committed_at_ms": committed,
+            "response_latency_anchor_at_ms": committed,
+            "response_latency_anchor": "turn_committed",
             "turn_processing_started_at_ms": started,
+            "turn_queue_delay_ms": round(started - committed, 1),
         }
 
     def note_llm_first_token(self) -> None:
-        if self.active_turn_evaluation is None or "llm_ttft_latency_ms" in self.active_turn_evaluation:
+        if self.active_turn_evaluation is None or "llm_model_ttft_ms" in self.active_turn_evaluation:
             return
         now = self.elapsed_ms()
         self.active_turn_evaluation["llm_first_token_at_ms"] = now
-        self.active_turn_evaluation["llm_ttft_latency_ms"] = round(now - self.active_turn_evaluation["turn_committed_at_ms"], 1)
+        processing_started = self.active_turn_evaluation["turn_processing_started_at_ms"]
+        committed = self.active_turn_evaluation["turn_committed_at_ms"]
+        # Model TTFT intentionally excludes endpointing and serial turn
+        # queueing.  Keep E2E separately so an overloaded pipeline is visible
+        # without misrepresenting model performance.
+        self.active_turn_evaluation["llm_model_ttft_ms"] = round(now - processing_started, 1)
+        self.active_turn_evaluation["e2e_llm_ttft_ms"] = round(now - committed, 1)
 
     def note_first_outbound_audio(self) -> None:
         if self.active_turn_evaluation is None or "first_outbound_audio_at_ms" in self.active_turn_evaluation:
@@ -133,6 +146,9 @@ class VoiceLinkCall:
         self.active_turn_evaluation["first_outbound_audio_at_ms"] = now
         self.active_turn_evaluation["first_outbound_audio_latency_ms"] = round(now - self.active_turn_evaluation["response_latency_anchor_at_ms"], 1)
         self.active_turn_evaluation["post_commit_first_outbound_audio_latency_ms"] = round(now - self.active_turn_evaluation["turn_committed_at_ms"], 1)
+        self.active_turn_evaluation["processing_to_first_outbound_audio_latency_ms"] = round(
+            now - self.active_turn_evaluation["turn_processing_started_at_ms"], 1
+        )
 
     def note_barge_in(self) -> bool:
         if self.active_turn_evaluation is None or "barge_in_detected_at_ms" in self.active_turn_evaluation:
@@ -576,7 +592,10 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
                 if first_chunk_at is None:
                     first_chunk_at = time.perf_counter()
                     call.note_llm_first_token()
-                    await call.metric(llm_ttft_ms=round((first_chunk_at-call.started_at)*1000,1))
+                    # Call-level records are long-lived aggregates.  This is
+                    # an absolute call timeline marker, not a per-turn TTFT;
+                    # use the versioned turn evaluation for latency percentiles.
+                    await call.metric(latest_llm_first_token_elapsed_ms=round((first_chunk_at-call.started_at)*1000,1))
                     await call.trace("llm.first_token", ttft_ms=round((first_chunk_at - llm_started) * 1000, 1))
                     # If the timer is still asleep it must never play later.
                     # If it already started, finish the short cue before

@@ -40,6 +40,9 @@ def word_error_rate(reference: str, hypothesis: str) -> dict[str, float | int | 
     return {"reference_words": len(expected), "errors": errors, "wer": round(errors / len(expected), 4)}
 
 
+CURRENT_SCHEMA_VERSION = 2
+
+
 def summarize_turns(records: Iterable[dict[str, Any]], silent_after_ms: int = 2500) -> dict[str, Any]:
     """Summarize metadata-only live or replayed voice-turn records.
 
@@ -47,7 +50,10 @@ def summarize_turns(records: Iterable[dict[str, Any]], silent_after_ms: int = 25
     telephone provider does not report actual handset playback, so this module
     never labels it as caller-heard audio.
     """
-    rows = [record.get("metrics", record) for record in records]
+    all_rows = [record.get("metrics", record) for record in records]
+    # Version 1 mixed queueing with model TTFT and could anchor a response to
+    # a stale VAD boundary.  Do not combine it with corrected measurements.
+    rows = [row for row in all_rows if row.get("evaluation_schema_version") == CURRENT_SCHEMA_VERSION]
     completed = [row for row in rows if row.get("evaluation_finalized")]
     first_audio_latencies = [
         row["first_outbound_audio_latency_ms"]
@@ -55,9 +61,19 @@ def summarize_turns(records: Iterable[dict[str, Any]], silent_after_ms: int = 25
         if isinstance(row.get("first_outbound_audio_latency_ms"), (int, float))
     ]
     llm_ttfts = [
-        row["llm_ttft_latency_ms"]
+        row["llm_model_ttft_ms"]
         for row in completed
-        if isinstance(row.get("llm_ttft_latency_ms"), (int, float))
+        if isinstance(row.get("llm_model_ttft_ms"), (int, float))
+    ]
+    e2e_llm_ttfts = [
+        row["e2e_llm_ttft_ms"]
+        for row in completed
+        if isinstance(row.get("e2e_llm_ttft_ms"), (int, float))
+    ]
+    queue_delays = [
+        row["turn_queue_delay_ms"]
+        for row in completed
+        if isinstance(row.get("turn_queue_delay_ms"), (int, float))
     ]
     silent = [
         row for row in completed
@@ -83,14 +99,23 @@ def summarize_turns(records: Iterable[dict[str, Any]], silent_after_ms: int = 25
 
     return {
         "definition": {
-            "first_audible_reply": "first outbound media frame handed to VoiceLink after a committed user turn; handset playback is not observable",
+            "measurement_schema_version": CURRENT_SCHEMA_VERSION,
+            "first_audible_reply": "first outbound media frame handed to VoiceLink after its committed transcript; handset playback is not observable",
+            "model_ttft": "first LLM token after turn processing begins; excludes endpointing and queueing",
+            "e2e_llm_ttft": "first LLM token after a transcript is committed; includes queueing",
+            "turn_queue_delay": "time from committed transcript to its turn beginning processing",
             "silent_turn": f"no first outbound frame within {silent_after_ms} ms after a committed user turn",
             "premature_turn": "requires an independently labelled reference_turn_end_ms; not inferred from VAD alone",
             "barge_in_stop": "time from detected caller speech while agent output is active to the pipeline's clear/stop hand-off",
         },
-        "turns": {"observed": len(rows), "completed": len(completed)},
+        "turns": {
+            "observed": len(rows), "completed": len(completed),
+            "excluded_legacy_measurements": len(all_rows) - len(rows),
+        },
         "first_audible_reply_proxy": distribution(first_audio_latencies),
-        "llm_ttft": distribution(llm_ttfts),
+        "model_ttft": distribution(llm_ttfts),
+        "e2e_llm_ttft": distribution(e2e_llm_ttfts),
+        "turn_queue_delay": distribution(queue_delays),
         "silent_turn_rate": round(len(silent) / len(completed), 4) if completed else None,
         "silent_turns": len(silent),
         "premature_turn_rate": round(len(premature) / len(annotated), 4) if annotated else None,

@@ -55,6 +55,15 @@ curl -sS -H "X-API-Key: $AGENT_API_KEY" \
 
 It returns:
 
+- `model_ttft`: p50, p95 and p99 from turn processing start to first LLM
+  token. This is the model/service figure and deliberately excludes a queued
+  earlier turn.
+- `e2e_llm_ttft`: p50, p95 and p99 from committed transcript to first LLM
+  token. Compare this with `model_ttft` to identify endpointing or queueing
+  delay.
+- `turn_queue_delay`: p50, p95 and p99 time a committed caller turn waited
+  before processing started. This is a pipeline-health metric, not model
+  latency.
 - `first_audible_reply_proxy`: p50, p95 and p99 milliseconds from committed
   caller turn to the first outbound media frame handed to VoiceLink.
 - `silent_turn_rate`: completed turns with no outbound frame within 2.5 s
@@ -65,6 +74,10 @@ It returns:
   still counted; no latency is invented.
 - `premature_turn_rate`: remains `null` until records are human-labelled with
   `reference_turn_end_ms`.
+
+Live records include `evaluation_schema_version`. The dashboard only combines
+the current schema version; historical records from an earlier schema are
+reported as excluded rather than being silently mixed into the current p95.
 
 For a public eval, use a consented or synthetic fixed test suite with: clean
 and noisy Hinglish speech, pauses inside a sentence, code-switching, short
