@@ -22,7 +22,7 @@ from fastapi import WebSocket
 
 from gnaniassignment.app.container import create_session
 from gnaniassignment.stt.gnani import GnaniRealtimeStt
-from gnaniassignment.tts.gnani import GnaniRealtimeTts, GnaniTtsError
+from gnaniassignment.tts.gnani import GnaniRealtimeTts, GnaniTtsError, should_add_clear_throat
 from gnaniassignment.voice.events import VoiceError, VoiceTranscript
 from gnaniassignment.voice.audio_enhancement import AudioEnhancer, create_audio_enhancer
 from gnaniassignment.telephony.latency import CallLatencyStore
@@ -351,7 +351,7 @@ class VoiceLinkCall:
         logger.info("voicelink transcript committed: stream=%s reason=%s segment=%s", self.stream_sid, reason, transcript.segment_id)
         return True
 
-    async def speak_reply(self, text: str) -> None:
+    async def speak_reply(self, text: str, *, add_clear_throat: bool = False) -> None:
         """Synthesize and send one streamed reply with auditable hand-off timing.
 
         VoiceLink documents outbound media as fire-and-forget.  These values
@@ -367,12 +367,18 @@ class VoiceLinkCall:
             "reply_text_characters": len(text),
             "reply_started_ms": round((reply_started - self.started_at) * 1000, 1),
             "outbound_frames_sent": 0,
+            "clear_throat_inserted": add_clear_throat,
         }
         try:
-            await self.trace("tts.started", reply_index=self.reply_count, text_characters=len(text))
+            await self.trace(
+                "tts.started", reply_index=self.reply_count, text_characters=len(text),
+                clear_throat_inserted=add_clear_throat,
+            )
+            if add_clear_throat:
+                await self.trace("tts.clear_throat", reply_index=self.reply_count)
             for attempt in range(2):
                 audio_chunks = 0
-                async for chunk in self.tts.synthesize(text):
+                async for chunk in self.tts.synthesize(text, add_clear_throat=add_clear_throat):
                     if self.reply_interrupted.is_set():
                         self.outbound_buffer.clear()
                         return
@@ -451,6 +457,15 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
         chunks: asyncio.Queue[str] = asyncio.Queue()
         loop = asyncio.get_running_loop()
         first_chunk_at: float | None = None
+        clear_throat_sent = False
+
+        def needs_clear_throat() -> bool:
+            if clear_throat_sent or first_chunk_at is None:
+                return False
+            if os.getenv("GNANI_TTS_POST_RESPONSE_CLEAR_THROAT_ENABLED", "false").lower() not in {"1", "true", "yes", "on"}:
+                return False
+            threshold_ms = float(os.getenv("GNANI_TTS_POST_RESPONSE_CLEAR_THROAT_MS", "500"))
+            return should_add_clear_throat((first_chunk_at - llm_started) * 1000, threshold_ms)
 
         def on_chunk(chunk: str) -> None:
             loop.call_soon_threadsafe(chunks.put_nowait, chunk)
@@ -471,14 +486,17 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
             # Start audio at a natural sentence boundary, or cap the fragment
             # so a slow model never becomes a voice note.
             if any(mark in pending for mark in ".!?") or len(pending) >= 90:
-                await call.speak_reply(pending.strip())
+                add_clear_throat = needs_clear_throat()
+                await call.speak_reply(pending.strip(), add_clear_throat=add_clear_throat)
+                clear_throat_sent = clear_throat_sent or add_clear_throat
                 pending = ""
                 if call.reply_interrupted.is_set():
                     outcome = "interrupted"
                     break
         result = await generation
         if pending.strip() and not call.reply_interrupted.is_set():
-            await call.speak_reply(pending.strip())
+            add_clear_throat = needs_clear_throat()
+            await call.speak_reply(pending.strip(), add_clear_throat=add_clear_throat)
         if call.reply_interrupted.is_set():
             outcome = "interrupted"
         await call.metric(llm_completed_ms=round((time.perf_counter()-call.started_at)*1000,1))
