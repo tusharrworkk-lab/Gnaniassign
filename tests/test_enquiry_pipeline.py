@@ -83,7 +83,7 @@ class PipelineTests(unittest.TestCase):
             last_first_audio_ms = None
             last_synthesis_ms = None
 
-            async def synthesize(self, text):
+            async def synthesize(self, text, **_kwargs):
                 self.last_first_audio_ms = 7.0
                 yield GnaniAudioChunk(b"\\x00" * 320, 0, True)
                 self.last_synthesis_ms = 9.0
@@ -121,7 +121,7 @@ class PipelineTests(unittest.TestCase):
             last_synthesis_ms = None
 
             def __init__(self): self.calls = self.reopens = 0
-            async def synthesize(self, text):
+            async def synthesize(self, text, **_kwargs):
                 self.calls += 1
                 if self.calls == 1:
                     self.last_synthesis_ms = 1.0
@@ -142,6 +142,32 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(tts.calls, 2)
         self.assertEqual(tts.reopens, 2)
         self.assertTrue(any(message["event"] == "media" for message in messages))
+
+    def test_voicelink_passes_clear_throat_tag_to_live_tts_once_requested(self):
+        from gnaniassignment.telephony.voicelink import VoiceLinkCall
+        from gnaniassignment.tts.gnani import GnaniAudioChunk
+
+        class WebSocket:
+            async def send_json(self, _message): pass
+
+        class Tts:
+            sample_rate = 8000
+            last_first_audio_ms = 1.0
+            last_synthesis_ms = 2.0
+
+            def __init__(self): self.clear_throat = None
+            async def synthesize(self, _text, *, add_clear_throat=False):
+                self.clear_throat = add_clear_throat
+                yield GnaniAudioChunk(b"\x00" * 320, 0, True)
+
+        async def run():
+            tts = Tts()
+            call = VoiceLinkCall(WebSocket(), "stream-1", "call-1", "caller", "customer", object(), tts, object())
+            call.metric = lambda **_values: asyncio.sleep(0)
+            await call.speak_reply("Hello", add_clear_throat=True)
+            return tts.clear_throat
+
+        self.assertTrue(asyncio.run(run()))
 
     def test_smart_turn_can_commit_a_nonfinal_stt_hypothesis_once(self):
         from gnaniassignment.telephony.voicelink import VoiceLinkCall
