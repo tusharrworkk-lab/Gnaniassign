@@ -79,6 +79,9 @@ class VoiceLinkCall:
     semantic_task: asyncio.Task[None] | None = None
     reply_count: int = 0
     _active_reply_metrics: dict[str, Any] | None = field(default=None, repr=False)
+    # A bounded, transcript-free trace lets the dashboard correlate the turn
+    # that created a response with its individual TTS and media hand-offs.
+    reply_handoffs: list[dict[str, Any]] = field(default_factory=list, repr=False)
     turn_queue: asyncio.Queue[VoiceTranscript] | None = field(default=None, repr=False)
     latest_transcript: VoiceTranscript | None = None
     semantic_complete_pending: bool = False
@@ -251,7 +254,14 @@ class VoiceLinkCall:
             self._active_reply_metrics.setdefault("outbound_first_frame_sent_ms", now_ms)
             if self._active_reply_metrics["outbound_frames_sent"] == 1:
                 self.note_first_outbound_audio()
-                await self.trace("tts.outbound_first_frame", reply_index=self.reply_count, elapsed_ms=now_ms)
+                await self.trace(
+                    "tts.outbound_first_frame",
+                    reply_index=self.reply_count,
+                    turn_index=self._active_reply_metrics.get("turn_index"),
+                    fragment_index=self._active_reply_metrics.get("fragment_index"),
+                    reply_kind=self._active_reply_metrics.get("reply_kind"),
+                    elapsed_ms=now_ms,
+                )
 
     async def flush_outbound(self) -> None:
         if self.outbound_buffer and not self.reply_interrupted.is_set():
@@ -374,7 +384,15 @@ class VoiceLinkCall:
         logger.info("voicelink transcript committed: stream=%s reason=%s segment=%s", self.stream_sid, reason, transcript.segment_id)
         return True
 
-    async def speak_reply(self, text: str, *, add_clear_throat: bool = False) -> None:
+    async def speak_reply(
+        self,
+        text: str,
+        *,
+        add_clear_throat: bool = False,
+        turn_index: int | None = None,
+        fragment_index: int | None = None,
+        reply_kind: str = "answer",
+    ) -> None:
         """Synthesize and send one streamed reply with auditable hand-off timing.
 
         VoiceLink documents outbound media as fire-and-forget.  These values
@@ -397,16 +415,27 @@ class VoiceLinkCall:
             "reply_started_ms": round((reply_started - self.started_at) * 1000, 1),
             "outbound_frames_sent": 0,
             "clear_throat_inserted": add_clear_throat,
+            "turn_index": turn_index,
+            "fragment_index": fragment_index,
+            "reply_kind": reply_kind,
         }
         try:
             await self.trace(
                 "tts.started", reply_index=self.reply_count, text_characters=len(text),
-                clear_throat_inserted=add_clear_throat,
+                clear_throat_inserted=add_clear_throat, turn_index=turn_index,
+                fragment_index=fragment_index, reply_kind=reply_kind,
             )
             if add_clear_throat:
                 await self.trace("tts.clear_throat", reply_index=self.reply_count)
             for attempt in range(2):
                 audio_chunks = 0
+                request_started = self.elapsed_ms()
+                self._active_reply_metrics["tts_request_started_ms"] = request_started
+                await self.trace(
+                    "tts.requested", reply_index=self.reply_count, turn_index=turn_index,
+                    fragment_index=fragment_index, reply_kind=reply_kind,
+                    elapsed_ms=request_started, attempt=attempt + 1,
+                )
                 async for chunk in self.tts.synthesize(text, add_clear_throat=add_clear_throat):
                     if self.reply_interrupted.is_set():
                         self.outbound_buffer.clear()
@@ -419,7 +448,14 @@ class VoiceLinkCall:
                         )
                         if not self._active_reply_metrics.get("tts_first_audio_emitted"):
                             self._active_reply_metrics["tts_first_audio_emitted"] = True
-                            await self.trace("tts.first_audio", reply_index=self.reply_count, tts_ttfa_ms=round(self.tts.last_first_audio_ms, 1))
+                            self._active_reply_metrics["tts_first_pcm_bytes"] = len(chunk.audio)
+                            await self.trace(
+                                "tts.first_audio", reply_index=self.reply_count,
+                                turn_index=turn_index, fragment_index=fragment_index,
+                                reply_kind=reply_kind,
+                                tts_ttfa_ms=round(self.tts.last_first_audio_ms, 1),
+                                pcm_bytes=len(chunk.audio),
+                            )
                     await self.send_media(chunk.audio)
                 if audio_chunks:
                     break
@@ -446,10 +482,18 @@ class VoiceLinkCall:
                     "mark": {"name": "response_done"},
                 })
             self._active_reply_metrics["outbound_mark_sent_ms"] = round((time.perf_counter() - self.started_at) * 1000, 1)
-            await self.metric(reply_count=self.reply_count, latest_reply=dict(self._active_reply_metrics))
             await self.trace("tts.completed", reply_index=self.reply_count, frames=self._active_reply_metrics["outbound_frames_sent"])
             logger.info("voicelink reply handed off: stream=%s metrics=%s", self.stream_sid, self._active_reply_metrics)
         finally:
+            if self._active_reply_metrics is not None:
+                snapshot = dict(self._active_reply_metrics)
+                self.reply_handoffs.append(snapshot)
+                del self.reply_handoffs[:-20]
+                await self.metric(
+                    reply_count=self.reply_count,
+                    latest_reply=snapshot,
+                    reply_handoffs=list(self.reply_handoffs),
+                )
             self._active_reply_metrics = None
 
 
@@ -506,8 +550,14 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
             if first_chunk_at is not None or generation.done() or call.reply_interrupted.is_set():
                 return False
             clear_throat_started = True
-            await call.trace("tts.clear_throat", proactive=True, threshold_ms=threshold_ms)
-            await call.speak_reply("", add_clear_throat=True)
+            await call.trace(
+                "tts.clear_throat", proactive=True, threshold_ms=threshold_ms,
+                turn_index=call.turn_index,
+            )
+            await call.speak_reply(
+                "", add_clear_throat=True, turn_index=call.turn_index,
+                reply_kind="latency_cue",
+            )
             return True
 
         def on_chunk(chunk: str) -> None:
@@ -516,6 +566,7 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
         generation = asyncio.create_task(asyncio.to_thread(call.session.ask_stream, stt_event.text, on_chunk))
         clear_throat_task = asyncio.create_task(play_proactive_clear_throat())
         pending = ""
+        fragment_index = 0
         try:
             while not generation.done() or not chunks.empty():
                 try:
@@ -540,14 +591,32 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
                 # Start audio at a natural sentence boundary, or cap the fragment
                 # so a slow model never becomes a voice note.
                 if any(mark in pending for mark in ".!?") or len(pending) >= 90:
-                    await call.speak_reply(pending.strip())
+                    fragment_index += 1
+                    fragment = pending.strip()
+                    await call.trace(
+                        "llm.fragment_ready", turn_index=call.turn_index,
+                        fragment_index=fragment_index, text_characters=len(fragment),
+                    )
+                    await call.speak_reply(
+                        fragment, turn_index=call.turn_index,
+                        fragment_index=fragment_index,
+                    )
                     pending = ""
                     if call.reply_interrupted.is_set():
                         outcome = "interrupted"
                         break
             result = await generation
             if pending.strip() and not call.reply_interrupted.is_set():
-                await call.speak_reply(pending.strip())
+                fragment_index += 1
+                fragment = pending.strip()
+                await call.trace(
+                    "llm.fragment_ready", turn_index=call.turn_index,
+                    fragment_index=fragment_index, text_characters=len(fragment),
+                )
+                await call.speak_reply(
+                    fragment, turn_index=call.turn_index,
+                    fragment_index=fragment_index,
+                )
         finally:
             if not clear_throat_task.done():
                 clear_throat_task.cancel()
