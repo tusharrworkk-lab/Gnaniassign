@@ -13,6 +13,9 @@ wheels/
 frontend/node_modules/
 frontend/dist/
 
+# Local Taste design audits and browser-check artifacts.
+.taste-skill/
+
 # Local API credentials
 .env
 .env.local-cloud

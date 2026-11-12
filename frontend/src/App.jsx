@@ -32,6 +32,17 @@ function StatusPill({ children, tone = "mint" }) {
   return <span className={`status-pill ${tone}`}><i />{children}</span>;
 }
 
+function todayLabel() {
+  return new Intl.DateTimeFormat("en-IN", { weekday: "long", day: "numeric", month: "long" }).format(new Date());
+}
+
+function dayGreeting() {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good morning";
+  if (hour < 17) return "Good afternoon";
+  return "Good evening";
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState(() => new URLSearchParams(window.location.search).get("tab") || "home");
   const [reviewed, setReviewed] = useState(new Set());
@@ -162,8 +173,8 @@ function App() {
         <div className="app-content">
         {activeTab === "home" && <header className="topbar">
           <div>
-            <p className="time-label">Tuesday · 14 October</p>
-            <h1>Good evening, Tushar</h1>
+            <p className="time-label"><span>Relay</span>{todayLabel()}</p>
+            <h1>{dayGreeting()}, Tushar</h1>
           </div>
           <button className="icon-button" aria-label="View notifications" onClick={() => setNotice("No new notifications. Demo data is shown below.")}><Icon name="bell" /></button>
         </header>}
@@ -176,22 +187,22 @@ function App() {
             <StatusPill tone={overviewState === "live" || !dashboardApiConfigured ? "mint" : "slate"}>{dashboard.agent.state}</StatusPill>
           </section>
 
-          <section className="live-call" aria-labelledby="live-call-heading">
-            <div className="section-heading"><div><h2 id="live-call-heading">Call in motion</h2></div><button className="quiet-button" onClick={refreshOverview}>{dashboardApiConfigured ? "Refresh" : "Pause demo"}</button></div>
-            <div className={`call-route ${dashboard.activeCall.live ? "is-live" : ""}`}>
+          <section className="live-call" aria-labelledby="live-call-heading" data-visual>
+            <div className="section-heading"><div><p className="section-kicker">Voice route</p><h2 id="live-call-heading">Call in motion</h2></div><button className="quiet-button" onClick={refreshOverview}>{dashboardApiConfigured ? "Refresh" : "Pause demo"}</button></div>
+            <div className={`call-route ${dashboard.activeCall.live ? "is-live" : ""}`} aria-label="Live caller to agent route">
               <div className="route-stop caller"><span>1</span><small>Caller</small></div>
               <div className="route-line"><b className="signal" /></div>
               <div className="route-stop agent"><span>2</span><small>Relay</small></div>
               <div className="route-line muted"><b /></div>
               <div className="route-stop outcome"><span>3</span><small>Reminder</small></div>
             </div>
-            <div className="call-detail"><div><strong>{dashboard.activeCall.caller}</strong><span>{dashboard.activeCall.started} · {dashboard.activeCall.state}</span></div><span className="call-control"><Icon name={dashboard.activeCall.live ? "pause" : "play"} size={17} /></span></div>
+            <div className="call-detail"><div><strong>{dashboard.activeCall.caller}</strong><span>{dashboard.activeCall.started} · {dashboard.activeCall.state}</span></div><span className={`call-control ${dashboard.activeCall.live ? "is-listening" : ""}`}>{dashboard.activeCall.live ? <span className="voice-level" aria-hidden="true"><i /><i /><i /></span> : <Icon name="play" size={17} />}</span></div>
             <p className="transcript">“{dashboard.activeCall.transcript}”</p>
             <div className="action-draft"><div><span>Next action</span><strong>{dashboard.activeCall.nextAction}</strong></div><p>{dashboard.activeCall.outcome}</p><Icon name="check" size={18} /></div>
           </section>
 
           <section className="today-section" aria-labelledby="today-heading">
-            <div className="section-heading"><div><h2 id="today-heading">Your day at a glance</h2></div><button className="text-link" onClick={() => setActiveTab("calls")}>All calls <Icon name="chevron" size={15} /></button></div>
+            <div className="section-heading"><div><h2 id="today-heading">Today’s call metrics</h2></div><button className="text-link" onClick={() => setActiveTab("calls")}>All calls <Icon name="chevron" size={15} /></button></div>
             <div className="metrics-row">
               <div><strong>{dashboard.today.calls}</strong><span>calls handled</span></div>
               <div><strong>{dashboard.today.quality}</strong><span>reply reliability</span></div>
@@ -200,7 +211,7 @@ function App() {
           </section>
 
           <section className="review-section" aria-labelledby="review-heading">
-            <div className="section-heading"><div><h2 id="review-heading">One decision needs you</h2></div><button className="text-link" onClick={() => setActiveTab("review")}>Review <Icon name="chevron" size={15} /></button></div>
+            <div className="section-heading"><div><h2 id="review-heading">MiniLM review queue</h2></div><button className="text-link" onClick={() => setActiveTab("review")}>Review <Icon name="chevron" size={15} /></button></div>
             {pendingReviews.slice(0, 1).map((review) => <ReviewPreview key={review.id} item={review} onOpen={(event) => openReview(review, event)} />)}
             {!pendingReviews.length && <div className="empty-line"><Icon name="check" /> Everything in tonight’s review queue is handled.</div>}
           </section>
