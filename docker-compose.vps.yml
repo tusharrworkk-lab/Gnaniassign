@@ -1,0 +1,7 @@
+# Single-VPS production overlay. Docker builds from the checked-out source;
+# secrets remain in the ignored .env.local-cloud file on the VPS.
+services:
+  api:
+    image: gnani-voice-agent:vps
+    environment:
+      AGENT_ENVIRONMENT: production
