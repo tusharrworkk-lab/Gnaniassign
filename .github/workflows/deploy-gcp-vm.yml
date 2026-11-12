@@ -1,4 +1,4 @@
-name: Test, build, and deploy to GCP
+name: Test, build, and deploy to VPS
 
 on:
   pull_request:
@@ -9,15 +9,10 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
-env:
-  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
-  GCP_REGION: ${{ vars.GCP_REGION }}
-  GCP_ARTIFACT_REPOSITORY: ${{ vars.GCP_ARTIFACT_REPOSITORY }}
-  GCP_ZONE: ${{ vars.GCP_ZONE }}
-  GCP_VM_NAME: ${{ vars.GCP_VM_NAME }}
-  HEALTHCHECK_URL: ${{ vars.HEALTHCHECK_URL }}
+concurrency:
+  group: vps-production-deploy
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -25,64 +20,52 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # GitHub-hosted runners include Android, .NET and Haskell SDKs that this
-      # Python voice service never uses. Free the ephemeral runner disk before
-      # uv resolves native voice/ML dependencies and Docker builds the image.
       - name: Free unused runner disk
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
           docker image prune --all --force
       - uses: astral-sh/setup-uv@v5
       - name: Install test dependencies
-        # Detector dependencies are tested through deterministic adapters;
-        # do not download Torch/ONNX stacks onto the ephemeral CI runner.
         run: uv sync --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt --extra google-calendar --extra test
       - name: Run tests
         run: uv run python -m unittest discover -s tests -p 'test_*.py'
 
   deploy:
-    name: Build, deploy, and verify
+    name: Build, deploy, and verify VPS
     if: github.event_name != 'pull_request'
     needs: test
     runs-on: ubuntu-latest
     environment: production
+    env:
+      VPS_DEPLOY_HOST: ${{ vars.VPS_DEPLOY_HOST }}
+      VPS_DEPLOY_USER: ${{ vars.VPS_DEPLOY_USER }}
+      VPS_DEPLOY_SSH_KEY: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
+      VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Free unused runner disk
+      - name: Configure pinned SSH connection
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
-          docker image prune --all --force
-      - id: auth
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
-      - uses: google-github-actions/setup-gcloud@v2
-      - name: Configure Artifact Registry authentication
-        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
-      - name: Build and push immutable image
-        id: image
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$VPS_DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 0600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/known_hosts"
+      - name: Deploy checked-out production revision
         run: |
-          IMAGE_URI="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GCP_ARTIFACT_REPOSITORY}/voice-agent:${GITHUB_SHA}"
-          docker build --tag "$IMAGE_URI" .
-          docker push "$IMAGE_URI"
-          echo "uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
-      - name: Copy deployment assets through IAP
-        run: |
-          gcloud compute ssh --tunnel-through-iap --project "$GCP_PROJECT_ID" --zone "$GCP_ZONE" "$GCP_VM_NAME" --command \
-            "mkdir -p /tmp/voice-agent-deploy"
-          gcloud compute scp --tunnel-through-iap --project "$GCP_PROJECT_ID" --zone "$GCP_ZONE" \
-            docker-compose.local-cloud.yml docker-compose.production.yml scripts/deploy-gcp-vm.sh \
-            "${GCP_VM_NAME}:/tmp/voice-agent-deploy/"
-      - name: Deploy and roll back locally if the container is unhealthy
-        env:
-          IMAGE_URI: ${{ steps.image.outputs.uri }}
-        run: |
-          gcloud compute ssh --tunnel-through-iap --project "$GCP_PROJECT_ID" --zone "$GCP_ZONE" "$GCP_VM_NAME" --command \
-            "sudo install -d -m 0755 /opt/voice-agent/app && \
-             sudo install -m 0644 /tmp/voice-agent-deploy/docker-compose.local-cloud.yml /opt/voice-agent/app/docker-compose.local-cloud.yml && \
-             sudo install -m 0644 /tmp/voice-agent-deploy/docker-compose.production.yml /opt/voice-agent/app/docker-compose.production.yml && \
-             sudo install -m 0755 /tmp/voice-agent-deploy/deploy-gcp-vm.sh /opt/voice-agent/app/deploy-gcp-vm.sh && \
-             sudo /opt/voice-agent/app/deploy-gcp-vm.sh '$IMAGE_URI'"
-      - name: Verify public HTTPS health endpoint
-        run: curl --fail --silent --show-error --retry 6 --retry-delay 10 "${HEALTHCHECK_URL}/healthz"
+          ssh -o BatchMode=yes "$VPS_DEPLOY_USER@$VPS_DEPLOY_HOST" '
+            set -Eeuo pipefail
+            cd /opt/voice-agent/app
+            git fetch origin master --depth=1
+            git checkout --detach origin/master
+            sudo docker compose --env-file .env.local-cloud \
+              -f docker-compose.local-cloud.yml -f docker-compose.vps.yml \
+              up -d --build --remove-orphans
+            for attempt in $(seq 1 18); do
+              if curl --fail --silent --show-error http://127.0.0.1:8080/healthz >/dev/null; then
+                exit 0
+              fi
+              sleep 5
+            done
+            sudo docker compose --env-file .env.local-cloud \
+              -f docker-compose.local-cloud.yml -f docker-compose.vps.yml ps
+            exit 1
+          '
