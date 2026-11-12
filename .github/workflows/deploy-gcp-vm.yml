@@ -55,6 +55,9 @@ jobs:
             set -Eeuo pipefail
             cd /opt/voice-agent/app
             git fetch origin master --depth=1
+            if [ -e docker-compose.vps.yml ] && ! git ls-files --error-unmatch docker-compose.vps.yml >/dev/null 2>&1; then
+              mv docker-compose.vps.yml docker-compose.vps.yml.pre-github-actions
+            fi
             git checkout --detach origin/master
             sudo docker compose --env-file .env.local-cloud \
               -f docker-compose.local-cloud.yml -f docker-compose.vps.yml \
