@@ -96,10 +96,11 @@ class PipelineTests(unittest.TestCase):
                 metrics.append(values)
 
             call.metric = record
-            await call.speak_reply("Hello")
-            return socket.messages, metrics
+            handed_off = await call.speak_reply("Hello")
+            return socket.messages, metrics, handed_off
 
-        messages, metrics = asyncio.run(run())
+        messages, metrics, handed_off = asyncio.run(run())
+        self.assertTrue(handed_off)
         reply = metrics[-1]["latest_reply"]
         self.assertEqual(messages[-1], {"event": "mark", "stream_sid": "stream-1", "mark": {"name": "response_done"}})
         self.assertGreater(reply["outbound_frames_sent"], 0)
