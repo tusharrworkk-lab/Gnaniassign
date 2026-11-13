@@ -28,11 +28,13 @@ RUN uv sync --frozen --no-dev --no-install-project \
     --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt --extra turn-detection --extra audio-enhancement --extra google-calendar
 
 COPY src ./src
+COPY assets ./assets
 COPY --from=dashboard-build /dashboard/dist ./dashboard
 RUN uv sync --frozen --no-dev --no-editable \
     --extra api --extra bedrock --extra postgres-memory --extra redis-cache --extra gnani-stt --extra turn-detection --extra audio-enhancement --extra google-calendar
 
-ENV PATH="/app/.venv/bin:$PATH"
+ENV PATH="/app/.venv/bin:$PATH" \
+    VOICE_LINK_CLEAR_THROAT_ALAW_FILE="/app/assets/clear_throat.alaw"
 EXPOSE 8080
 
 CMD ["uvicorn", "gnaniassignment.api.server:app", "--host", "0.0.0.0", "--port", "8080", "--proxy-headers"]

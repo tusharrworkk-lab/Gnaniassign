@@ -15,6 +15,8 @@ import json
 import logging
 import time
 import os
+from functools import lru_cache
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,6 +35,15 @@ PCM_WIDTH = 2
 VOICE_LINK_FRAME_BYTES = 160  # 20 ms: 8000 samples/s × 20 ms × 8-bit A-law
 VOICE_EVALUATION_SCHEMA_VERSION = 2
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=2)
+def _cached_cue_frames(path: str) -> tuple[bytes, ...]:
+    """Load a pre-encoded 8 kHz A-law cue once per server process."""
+    audio = Path(path).read_bytes()
+    if not audio or len(audio) % VOICE_LINK_FRAME_BYTES:
+        raise ValueError("Cached VoiceLink cue must contain complete 160-byte A-law frames")
+    return tuple(audio[index:index + VOICE_LINK_FRAME_BYTES] for index in range(0, len(audio), VOICE_LINK_FRAME_BYTES))
 
 
 def _turn_wait_seconds(
@@ -478,51 +489,58 @@ class VoiceLinkCall:
             )
             if add_clear_throat:
                 await self.trace("tts.clear_throat", reply_index=self.reply_count)
-            for attempt in range(2):
-                audio_chunks = 0
-                request_started = self.elapsed_ms()
-                self._active_reply_metrics["tts_request_started_ms"] = request_started
-                await self.trace(
-                    "tts.requested", reply_index=self.reply_count, turn_index=turn_index,
-                    fragment_index=fragment_index, reply_kind=reply_kind,
-                    elapsed_ms=request_started, attempt=attempt + 1,
-                )
-                async for chunk in self.tts.synthesize(text, add_clear_throat=add_clear_throat):
+            cue_path = os.getenv("VOICE_LINK_CLEAR_THROAT_ALAW_FILE", "").strip() if add_clear_throat and not text.strip() else ""
+            if cue_path:
+                frames = _cached_cue_frames(cue_path)
+                self._active_reply_metrics["cue_source"] = "local_alaw"
+                await self.trace("tts.local_cue", reply_index=self.reply_count, frames=len(frames))
+                for frame in frames:
                     if self.reply_interrupted.is_set():
-                        self.outbound_buffer.clear()
                         return
-                    audio_chunks += 1
-                    if self.tts.last_first_audio_ms is not None:
-                        self._active_reply_metrics.setdefault(
-                            "tts_first_audio_ms",
-                            round((reply_started - self.started_at) * 1000 + self.tts.last_first_audio_ms, 1),
-                        )
-                        if not self._active_reply_metrics.get("tts_first_audio_emitted"):
-                            self._active_reply_metrics["tts_first_audio_emitted"] = True
-                            self._active_reply_metrics["tts_first_pcm_bytes"] = len(chunk.audio)
-                            await self.trace(
-                                "tts.first_audio", reply_index=self.reply_count,
-                                turn_index=turn_index, fragment_index=fragment_index,
-                                reply_kind=reply_kind,
-                                tts_ttfa_ms=round(self.tts.last_first_audio_ms, 1),
-                                pcm_bytes=len(chunk.audio),
+                    await self._send_outbound_frame(frame)
+            else:
+                for attempt in range(2):
+                    audio_chunks = 0
+                    request_started = self.elapsed_ms()
+                    self._active_reply_metrics["tts_request_started_ms"] = request_started
+                    await self.trace(
+                        "tts.requested", reply_index=self.reply_count, turn_index=turn_index,
+                        fragment_index=fragment_index, reply_kind=reply_kind,
+                        elapsed_ms=request_started, attempt=attempt + 1,
+                    )
+                    async for chunk in self.tts.synthesize(text, add_clear_throat=add_clear_throat):
+                        if self.reply_interrupted.is_set():
+                            self.outbound_buffer.clear()
+                            return
+                        audio_chunks += 1
+                        if self.tts.last_first_audio_ms is not None:
+                            self._active_reply_metrics.setdefault(
+                                "tts_first_audio_ms",
+                                round((reply_started - self.started_at) * 1000 + self.tts.last_first_audio_ms, 1),
                             )
-                    await self.send_media(chunk.audio)
-                if audio_chunks:
-                    break
-                if attempt == 0:
-                    # A terminal complete event with zero audio is not a
-                    # successful spoken reply. Reopen and retry once: no
-                    # caller audio has been sent, so duplication is impossible.
-                    await self.trace("tts.zero_audio_retry", reply_index=self.reply_count)
-                    await self.tts.__aexit__(None, None, None)
-                    await self.tts.__aenter__()
-                    continue
-                raise GnaniTtsError("Gnani TTS completed without producing audio")
+                            if not self._active_reply_metrics.get("tts_first_audio_emitted"):
+                                self._active_reply_metrics["tts_first_audio_emitted"] = True
+                                self._active_reply_metrics["tts_first_pcm_bytes"] = len(chunk.audio)
+                                await self.trace(
+                                    "tts.first_audio", reply_index=self.reply_count,
+                                    turn_index=turn_index, fragment_index=fragment_index,
+                                    reply_kind=reply_kind,
+                                    tts_ttfa_ms=round(self.tts.last_first_audio_ms, 1),
+                                    pcm_bytes=len(chunk.audio),
+                                )
+                        await self.send_media(chunk.audio)
+                    if audio_chunks:
+                        break
+                    if attempt == 0:
+                        await self.trace("tts.zero_audio_retry", reply_index=self.reply_count)
+                        await self.tts.__aexit__(None, None, None)
+                        await self.tts.__aenter__()
+                        continue
+                    raise GnaniTtsError("Gnani TTS completed without producing audio")
             await self.flush_outbound()
             if self.reply_interrupted.is_set():
                 return
-            self._active_reply_metrics["tts_completed_ms"] = round(
+            self._active_reply_metrics["tts_completed_ms"] = self.elapsed_ms() if cue_path else round(
                 (reply_started - self.started_at) * 1000 + (self.tts.last_synthesis_ms or 0), 1
             )
             # This outbound marker is optional for playback, but lets VoiceLink
