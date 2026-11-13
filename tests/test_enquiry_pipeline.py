@@ -196,6 +196,37 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(transcript.text, "kal meri party hai")
         self.assertEqual(metrics[-1]["stt_turn_committed_by"], "smart_turn")
 
+    def test_provider_final_uses_short_continuation_grace_without_endpoint_vad(self):
+        from gnaniassignment.telephony.voicelink import _turn_wait_seconds
+
+        final = GnaniTranscript("kal party hai", is_final=True)
+        partial = GnaniTranscript("kal party", is_final=False)
+        self.assertEqual(
+            _turn_wait_seconds(final, coalesce_ms=1100, provider_final_grace_ms=250, vad_mode="off"),
+            0.25,
+        )
+        self.assertEqual(
+            _turn_wait_seconds(partial, coalesce_ms=1100, provider_final_grace_ms=250, vad_mode="off"),
+            1.1,
+        )
+        self.assertEqual(
+            _turn_wait_seconds(final, coalesce_ms=1100, provider_final_grace_ms=250, vad_mode="endpoint"),
+            1.1,
+        )
+
+    def test_early_tts_fragment_waits_for_a_word_boundary(self):
+        from gnaniassignment.telephony.voicelink import _take_tts_fragment
+
+        self.assertIsNone(_take_tts_fragment("Haan main", 12))
+        self.assertEqual(
+            _take_tts_fragment("Haan main Tushar ko bata dungi aap", 20),
+            ("Haan main Tushar ko bata", "dungi aap"),
+        )
+        self.assertEqual(
+            _take_tts_fragment("Haan, bilkul.", 42),
+            ("Haan, bilkul.", ""),
+        )
+
     def test_audio_enhancement_runs_before_voice_link_vad_and_stt(self):
         import audioop
         import base64

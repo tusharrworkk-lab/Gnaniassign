@@ -35,6 +35,41 @@ VOICE_EVALUATION_SCHEMA_VERSION = 2
 logger = logging.getLogger(__name__)
 
 
+def _turn_wait_seconds(
+    transcript: VoiceTranscript,
+    *,
+    coalesce_ms: int,
+    provider_final_grace_ms: int,
+    vad_mode: str,
+) -> float:
+    """Return the maximum wait for a possible continuation of one turn.
+
+    A provider-final transcript is already a much stronger boundary than an
+    interim hypothesis. Without endpoint VAD, treating it like an arbitrary
+    fragment made every completed utterance wait the full legacy 1.1 seconds.
+    Keep a short grace period, but do not make it the normal response path.
+    """
+    if transcript.is_final and vad_mode != "endpoint":
+        return provider_final_grace_ms / 1000
+    return coalesce_ms / 1000
+
+
+def _take_tts_fragment(text: str, minimum_characters: int) -> tuple[str, str] | None:
+    """Take a speakable early fragment without cutting a word in half."""
+    stripped = text.lstrip()
+    if not stripped:
+        return None
+    for index, character in enumerate(stripped):
+        if character in ".!?" and (index + 1 == len(stripped) or stripped[index + 1].isspace()):
+            return stripped[: index + 1].strip(), stripped[index + 1 :].lstrip()
+    if len(stripped) < minimum_characters:
+        return None
+    boundary = stripped.find(" ", minimum_characters)
+    if boundary < 0:
+        return None
+    return stripped[:boundary].strip(), stripped[boundary + 1 :].lstrip()
+
+
 def _decode_alaw(payload: str) -> bytes:
     """Decode VoiceLink's documented base64 A-law media payload."""
     try:
@@ -583,6 +618,14 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
         clear_throat_task = asyncio.create_task(play_proactive_clear_throat())
         pending = ""
         fragment_index = 0
+        first_fragment_characters = max(
+            24,
+            min(int(os.getenv("VOICE_LINK_TTS_FIRST_FRAGMENT_CHARS", "42")), 160),
+        )
+        later_fragment_characters = max(
+            first_fragment_characters,
+            min(int(os.getenv("VOICE_LINK_TTS_FRAGMENT_CHARS", "90")), 320),
+        )
         try:
             while not generation.done() or not chunks.empty():
                 try:
@@ -607,11 +650,14 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
                     except asyncio.CancelledError:
                         pass
                 pending += chunk
-                # Start audio at a natural sentence boundary, or cap the fragment
-                # so a slow model never becomes a voice note.
-                if any(mark in pending for mark in ".!?") or len(pending) >= 90:
+                # The first spoken phrase has a smaller threshold than later
+                # phrases. Waiting for an entire sentence/90 characters hid
+                # the model's fast TTFT behind another ~1 second of streaming.
+                minimum = first_fragment_characters if fragment_index == 0 else later_fragment_characters
+                ready = _take_tts_fragment(pending, minimum)
+                if ready is not None:
                     fragment_index += 1
-                    fragment = pending.strip()
+                    fragment, pending = ready
                     await call.trace(
                         "llm.fragment_ready", turn_index=call.turn_index,
                         fragment_index=fragment_index, text_characters=len(fragment),
@@ -620,7 +666,6 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
                         fragment, turn_index=call.turn_index,
                         fragment_index=fragment_index,
                     )
-                    pending = ""
                     if call.reply_interrupted.is_set():
                         outcome = "interrupted"
                         break
@@ -742,6 +787,10 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                 # a short cluster as one user turn instead of asking the LLM
                 # to respond to every fragment.
                 coalesce_ms = max(250, min(int(os.getenv("VOICELINK_TURN_COALESCE_MS", "1100")), 3000))
+                provider_final_grace_ms = max(
+                    0,
+                    min(int(os.getenv("VOICELINK_PROVIDER_FINAL_GRACE_MS", "250")), coalesce_ms),
+                )
                 turns: asyncio.Queue[VoiceTranscript] = asyncio.Queue()
                 call.turn_queue = turns
 
@@ -755,7 +804,12 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                             # decision. Smart Turn's result must wake this
                             # worker; otherwise a semantic completion would
                             # still pay the legacy coalescing timeout.
-                            wait_seconds = coalesce_ms / 1000
+                            wait_seconds = _turn_wait_seconds(
+                                first,
+                                coalesce_ms=coalesce_ms,
+                                provider_final_grace_ms=provider_final_grace_ms,
+                                vad_mode=call.vad_mode,
+                            )
                             get_segment = asyncio.create_task(turns.get())
                             endpoint_wait: asyncio.Task[bool] | None = None
                             waiters: set[asyncio.Task[Any]] = {get_segment}
