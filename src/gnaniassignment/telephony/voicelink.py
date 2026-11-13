@@ -787,7 +787,7 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                 # final arrives promptly even when no interim hypothesis is
                 # available to Smart Turn.
                 stt = GnaniRealtimeStt(
-                    min_silence_ms=int(os.getenv("VOICE_LINK_STT_MIN_SILENCE_MS", "350")),
+                    min_silence_ms=int(os.getenv("VOICE_LINK_STT_MIN_SILENCE_MS", "400")),
                 )
                 tts = GnaniRealtimeTts()
                 await stt.__aenter__()

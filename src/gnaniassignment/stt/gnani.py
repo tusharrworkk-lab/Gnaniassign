@@ -51,17 +51,21 @@ class GnaniRealtimeStt:
         min_speech_ms: int | None = None,
         min_segment_ms: int | None = None,
         connect: Callable[[str, dict[str, str]], Awaitable[Any]] | None = None,
+        model: str | None = None,
     ) -> None:
         self.api_key = api_key or os.getenv("GNANI_API_KEY")
         if not self.api_key:
             raise ValueError("Set GNANI_API_KEY in .env or pass api_key explicitly")
         self.language_code = language_code or os.getenv("GNANI_STT_LANGUAGE", "en-IN")
+        self.model = model or os.getenv("GNANI_STT_MODEL", "prisma-v3.0")
+        if self.model not in {"prisma-v2.5", "prisma-v3.0"}:
+            raise ValueError("GNANI_STT_MODEL must be prisma-v2.5 or prisma-v3.0")
         self.sample_rate = sample_rate or int(os.getenv("GNANI_STT_SAMPLE_RATE", "16000"))
         if self.sample_rate not in {8000, 16000, 44100, 48000}:
             raise ValueError("GNANI_STT_SAMPLE_RATE must be 8000, 16000, 44100, or 48000")
         self.endpoint = endpoint or os.getenv("GNANI_STT_ENDPOINT", GNANI_STT_ENDPOINT)
         self.vad_threshold = vad_threshold if vad_threshold is not None else float(os.getenv("GNANI_VAD_THRESHOLD", "0.55"))
-        self.min_silence_ms = min_silence_ms if min_silence_ms is not None else int(os.getenv("GNANI_MIN_SILENCE_MS", "100"))
+        self.min_silence_ms = min_silence_ms if min_silence_ms is not None else int(os.getenv("GNANI_MIN_SILENCE_MS", "400"))
         self.min_speech_ms = min_speech_ms if min_speech_ms is not None else int(os.getenv("GNANI_MIN_SPEECH_MS", "50"))
         self.min_segment_ms = min_segment_ms if min_segment_ms is not None else int(os.getenv("GNANI_MIN_SEGMENT_MS", "100"))
         if not 0.0 <= self.vad_threshold <= 1.0:
@@ -87,6 +91,7 @@ class GnaniRealtimeStt:
         return {
             "x-api-key-id": self.api_key,
             "lang_code": self.language_code,
+            "model": self.model,
             "x-sample-rate": str(self.sample_rate),
             "x-format": os.getenv("GNANI_STT_FORMAT", "verbatim"),
             "x-vad-threshold": str(self.vad_threshold),
