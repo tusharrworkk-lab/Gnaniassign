@@ -1,7 +1,9 @@
 """VoiceLink WebSocket media adapter.
 
-VoiceLink streams base64 A-law at 8 kHz. Gnani STT receives 16-bit PCM in
-1024-byte frames; Gnani TTS returns linear PCM which we convert back to A-law.
+The wire format comes from each call's start event, not the WebSocket bot's
+configured audio_format. VoiceLink has been observed sending 8 kHz A-law
+even when configured for 16 kHz linear PCM. A true 16 kHz L16 stream feeds
+Gnani STT and TEN directly. Outbound audio matches the inbound wire format.
 The provider envelope is intentionally kept here, outside the agent core.
 """
 
@@ -28,9 +30,8 @@ from gnaniassignment.voice.audio_enhancement import AudioEnhancer, create_audio_
 from gnaniassignment.telephony.latency import CallLatencyStore
 
 
-VOICE_LINK_SAMPLE_RATE = 8000
 PCM_WIDTH = 2
-VOICE_LINK_FRAME_BYTES = 160  # 20 ms: 8000 samples/s × 20 ms × 8-bit A-law
+MEDIA_FRAME_MS = 20
 VOICE_EVALUATION_SCHEMA_VERSION = 2
 logger = logging.getLogger(__name__)
 
@@ -70,18 +71,69 @@ def _take_tts_fragment(text: str, minimum_characters: int) -> tuple[str, str] | 
     return stripped[:boundary].strip(), stripped[boundary + 1 :].lstrip()
 
 
-def _decode_alaw(payload: str) -> bytes:
-    """Decode VoiceLink's documented base64 A-law media payload."""
+@dataclass(frozen=True)
+class VoiceLinkMediaFormat:
+    encoding: str = "audio/alaw"
+    sample_rate: int = 8000
+
+    @property
+    def frame_bytes(self) -> int:
+        width = PCM_WIDTH if self.encoding == "audio/l16" else 1
+        return self.sample_rate * MEDIA_FRAME_MS // 1000 * width
+
+    @property
+    def silence_byte(self) -> bytes:
+        return {"audio/alaw": b"\xd5", "audio/ulaw": b"\xff", "audio/l16": b"\x00"}[self.encoding]
+
+    def decode(self, payload: str) -> bytes:
+        try:
+            raw = base64.b64decode(payload, validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise ValueError("VoiceLink media.payload must be valid base64") from error
+        if self.encoding == "audio/alaw":
+            return audioop.alaw2lin(raw, PCM_WIDTH)
+        if self.encoding == "audio/ulaw":
+            return audioop.ulaw2lin(raw, PCM_WIDTH)
+        if len(raw) % PCM_WIDTH:
+            raise ValueError("VoiceLink L16 payload must contain complete 16-bit samples")
+        return raw
+
+    def encode(self, pcm: bytes) -> bytes:
+        if self.encoding == "audio/alaw":
+            return audioop.lin2alaw(pcm, PCM_WIDTH)
+        if self.encoding == "audio/ulaw":
+            return audioop.lin2ulaw(pcm, PCM_WIDTH)
+        return pcm
+
+
+def _parse_media_format(start: dict[str, Any]) -> VoiceLinkMediaFormat:
+    media = start.get("media_format")
+    if not isinstance(media, dict):
+        raise ValueError("VoiceLink start event requires media_format")
+    raw_encoding = media.get("encoding")
+    if not isinstance(raw_encoding, str):
+        raise ValueError("VoiceLink media_format.encoding must be a string")
+    name = raw_encoding.strip().lower().removeprefix("audio/")
+    encoding = {
+        "alaw": "audio/alaw", "pcma": "audio/alaw",
+        "ulaw": "audio/ulaw", "mulaw": "audio/ulaw", "pcmu": "audio/ulaw",
+        "l16": "audio/l16", "pcm": "audio/l16",
+    }.get(name)
     try:
-        encoded = base64.b64decode(payload, validate=True)
-    except (ValueError, binascii.Error) as error:
-        raise ValueError("VoiceLink media.payload must be valid base64") from error
-    return audioop.alaw2lin(encoded, PCM_WIDTH)
-
-
-def _encode_alaw(pcm: bytes) -> str:
-    """Return an outbound VoiceLink media.payload from 16-bit PCM."""
-    return base64.b64encode(audioop.lin2alaw(pcm, PCM_WIDTH)).decode("ascii")
+        rate = int(media.get("sample_rate"))
+    except (TypeError, ValueError) as error:
+        raise ValueError("VoiceLink media_format.sample_rate must be 8000 or 16000") from error
+    # Match VoiceLink SDK 0.1.1's voicelink.media.audio.resolve_spec mapping.
+    # An unknown pair must fail: decoding it as the wrong codec sounds like
+    # noise but may still yield plausible STT results.
+    if (encoding, rate) not in {
+        ("audio/alaw", 8000),
+        ("audio/ulaw", 8000),
+        ("audio/l16", 8000),
+        ("audio/l16", 16000),
+    }:
+        raise ValueError(f"Unsupported VoiceLink media format: {raw_encoding} at {rate} Hz")
+    return VoiceLinkMediaFormat(encoding, rate)
 
 
 @dataclass
@@ -96,6 +148,7 @@ class VoiceLinkCall:
     stt: GnaniRealtimeStt
     tts: GnaniRealtimeTts
     session: Any
+    media_format: VoiceLinkMediaFormat = field(default_factory=VoiceLinkMediaFormat)
     input_resample_state: Any = None
     output_resample_state: Any = None
     pcm_buffer: bytearray = field(default_factory=bytearray)
@@ -250,34 +303,34 @@ class VoiceLinkCall:
             )
 
     async def send_media(self, pcm: bytes) -> None:
-        """Resample linear TTS PCM and send the documented outbound frame."""
+        """Convert linear TTS PCM to the negotiated outbound media format."""
         if not pcm or self.reply_interrupted.is_set():
             return
-        converted, self.output_resample_state = audioop.ratecv(
-            pcm,
-            PCM_WIDTH,
-            1,
-            self.tts.sample_rate,
-            VOICE_LINK_SAMPLE_RATE,
-            self.output_resample_state,
-        )
+        if self.tts.sample_rate == self.media_format.sample_rate:
+            converted = pcm
+        else:
+            converted, self.output_resample_state = audioop.ratecv(
+                pcm, PCM_WIDTH, 1, self.tts.sample_rate,
+                self.media_format.sample_rate, self.output_resample_state,
+            )
         if not converted:
             return
-        self.outbound_buffer.extend(audioop.lin2alaw(converted, PCM_WIDTH))
-        while len(self.outbound_buffer) >= VOICE_LINK_FRAME_BYTES:
-            frame = bytes(self.outbound_buffer[:VOICE_LINK_FRAME_BYTES])
-            del self.outbound_buffer[:VOICE_LINK_FRAME_BYTES]
+        self.outbound_buffer.extend(self.media_format.encode(converted))
+        frame_bytes = self.media_format.frame_bytes
+        while len(self.outbound_buffer) >= frame_bytes:
+            frame = bytes(self.outbound_buffer[:frame_bytes])
+            del self.outbound_buffer[:frame_bytes]
             await self._send_outbound_frame(frame)
 
-    async def _send_outbound_frame(self, alaw: bytes) -> None:
+    async def _send_outbound_frame(self, frame: bytes) -> None:
         if self.reply_interrupted.is_set():
             return
-        # VoiceLink expects telephony audio in 20 ms A-law packets. Pace from
+        # VoiceLink expects audio in 20 ms packets. Pace from
         # a monotonic deadline instead of sleeping *after* send: that avoids
         # bursts when the event loop is delayed and gives us a real jitter
         # measurement for carrier-quality debugging.
-        if len(alaw) != VOICE_LINK_FRAME_BYTES:
-            raise ValueError("VoiceLink outbound frames must be exactly 160 bytes / 20 ms")
+        if len(frame) != self.media_format.frame_bytes:
+            raise ValueError(f"VoiceLink outbound frames must be exactly {self.media_format.frame_bytes} bytes / 20 ms")
         if self.outbound_next_frame_at is not None:
             wait_seconds = self.outbound_next_frame_at - time.perf_counter()
             if wait_seconds > 0:
@@ -285,10 +338,10 @@ class VoiceLinkCall:
         async with self.send_lock:
             await self.websocket.send_json({
                 "event": "media", "stream_sid": self.stream_sid,
-                "media": {"payload": base64.b64encode(alaw).decode("ascii")},
+                "media": {"payload": base64.b64encode(frame).decode("ascii")},
             })
         sent_at = time.perf_counter()
-        self.outbound_next_frame_at = sent_at + 0.02
+        self.outbound_next_frame_at = sent_at + MEDIA_FRAME_MS / 1000
         # This measures that our server handed a frame to the WebSocket.  It
         # is deliberately *not* labelled "played": VoiceLink's documented
         # media/mark events do not acknowledge handset playback.
@@ -316,33 +369,30 @@ class VoiceLinkCall:
 
     async def flush_outbound(self) -> None:
         if self.outbound_buffer and not self.reply_interrupted.is_set():
-            # Never send a short terminal packet. A-law telephony gateways
-            # consume fixed 20 ms frames; zero-padding is silence and avoids
+            # Never send a short terminal packet. Media gateways consume
+            # fixed 20 ms frames; padding with codec silence avoids
             # a truncated/corrupted tail at sentence boundaries.
-            frame = bytes(self.outbound_buffer).ljust(VOICE_LINK_FRAME_BYTES, b"\xd5")
+            frame = bytes(self.outbound_buffer).ljust(self.media_format.frame_bytes, self.media_format.silence_byte)
             self.outbound_buffer.clear()
             await self._send_outbound_frame(frame)
 
     async def feed_media(self, payload: str) -> list[Any]:
-        """Decode, resample, and frame inbound VoiceLink audio for Gnani."""
+        """Decode and frame inbound VoiceLink audio for Gnani."""
         self.inbound_packets += 1
         if self.inbound_packets == 1:
             await self.metric(media_first_packet_ms=round((time.perf_counter()-self.started_at)*1000,1))
-            await self.trace("media.inbound_started", sample_rate=VOICE_LINK_SAMPLE_RATE, encoding="audio/alaw")
+            await self.trace("media.inbound_started", sample_rate=self.media_format.sample_rate, encoding=self.media_format.encoding)
         if self.inbound_packets == 1 or self.inbound_packets % 100 == 0:
             logger.info("voicelink inbound media: stream=%s packets=%d", self.stream_sid, self.inbound_packets)
-        pcm_8k = _decode_alaw(payload)
-        pcm_16k, self.input_resample_state = audioop.ratecv(
-            pcm_8k,
-            PCM_WIDTH,
-            1,
-            VOICE_LINK_SAMPLE_RATE,
-            self.stt.sample_rate,
-            self.input_resample_state,
-        )
+        pcm = self.media_format.decode(payload)
+        if self.media_format.sample_rate != self.stt.sample_rate:
+            pcm, self.input_resample_state = audioop.ratecv(
+                pcm, PCM_WIDTH, 1, self.media_format.sample_rate,
+                self.stt.sample_rate, self.input_resample_state,
+            )
         if self.audio_enhancer is not None:
-            enhanced = self.audio_enhancer.process_pcm_s16le(pcm_16k)
-            pcm_16k = enhanced.audio
+            enhanced = self.audio_enhancer.process_pcm_s16le(pcm)
+            pcm = enhanced.audio
             self.enhancement_frames += 1
             # One event per second at VoiceLink's 20 ms cadence keeps the
             # debugging feed useful without flooding it with audio metadata.
@@ -367,7 +417,7 @@ class VoiceLinkCall:
         if self.vad is not None:
             # Both optional detectors consume the exact 16 kHz PCM stream
             # sent to STT. TEN requires it; Silero also supports it.
-            boundaries = self.vad.feed_pcm_s16le(pcm_16k)
+            boundaries = self.vad.feed_pcm_s16le(pcm)
             for boundary in boundaries:
                 if boundary.kind == "speech_started":
                     self.last_speech_started_ms = self.elapsed_ms()
@@ -383,7 +433,7 @@ class VoiceLinkCall:
                     # analysis. It is not yet permission to commit a turn.
                     if self.vad_backend != "ten_pipecat":
                         self.vad_turn_ended.set()
-        self.pcm_buffer.extend(pcm_16k)
+        self.pcm_buffer.extend(pcm)
         while len(self.pcm_buffer) >= self.stt.frame_bytes:
             frame = bytes(self.pcm_buffer[:self.stt.frame_bytes])
             del self.pcm_buffer[:self.stt.frame_bytes]
@@ -548,7 +598,7 @@ class VoiceLinkCall:
             self._active_reply_metrics = None
 
 
-def _call_context(payload: dict[str, Any]) -> tuple[str, str, str, str]:
+def _call_context(payload: dict[str, Any]) -> tuple[str, str, str, str, VoiceLinkMediaFormat]:
     start = payload.get("start")
     if not isinstance(start, dict):
         raise ValueError("VoiceLink start event requires a start object")
@@ -557,12 +607,10 @@ def _call_context(payload: dict[str, Any]) -> tuple[str, str, str, str]:
     caller_id = str(start.get("from") or "unknown").strip()
     if not stream_sid or not call_sid:
         raise ValueError("VoiceLink start event requires stream_sid and call_sid")
-    media_format = start.get("media_format")
-    if not isinstance(media_format, dict) or media_format.get("encoding") != "audio/alaw" or str(media_format.get("sample_rate")) != "8000":
-        raise ValueError("VoiceLink stream must use documented audio/alaw at 8000 Hz")
+    media_format = _parse_media_format(start)
     custom = start.get("custom_parameters")
     customer_id = custom.get("customer_id") if isinstance(custom, dict) else None
-    return stream_sid, call_sid, caller_id, str(customer_id or f"caller:{caller_id}")
+    return stream_sid, call_sid, caller_id, str(customer_id or f"caller:{caller_id}"), media_format
 
 
 async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, events: Any | None) -> None:
@@ -733,7 +781,7 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
             if event_name == "start":
                 if call is not None:
                     raise ValueError("VoiceLink stream sent start more than once")
-                stream_sid, call_sid, caller_id, customer_id = _call_context(event)
+                stream_sid, call_sid, caller_id, customer_id, media_format = _call_context(event)
                 # VoiceLink endpointing owns the completed-turn decision.
                 # Request a short provider final-silence window so an STT
                 # final arrives promptly even when no interim hypothesis is
@@ -744,7 +792,7 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                 tts = GnaniRealtimeTts()
                 await stt.__aenter__()
                 await tts.__aenter__()
-                call = VoiceLinkCall(websocket, stream_sid, call_sid, caller_id, customer_id, stt, tts, create_session(customer_id=customer_id, session_id=stream_sid))
+                call = VoiceLinkCall(websocket, stream_sid, call_sid, caller_id, customer_id, stt, tts, create_session(customer_id=customer_id, session_id=stream_sid), media_format=media_format)
                 call.events = events
                 call.audio_enhancer = create_audio_enhancer(call.stt.sample_rate)
                 # New generic settings supersede the legacy Silero-only
@@ -777,10 +825,10 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                     call.vad_mode = vad_mode
                     call.vad_backend = backend
                 call.latency_store = CallLatencyStore() if os.getenv("CALL_LATENCY_METRICS_ENABLED", "true").lower() == "true" else None
-                await call.metric(call_started=True)
-                logger.info("voicelink call started: stream=%s call=%s", stream_sid, call_sid)
+                await call.metric(call_started=True, media_sample_rate=media_format.sample_rate, media_encoding=media_format.encoding)
+                logger.info("voicelink call started: stream=%s call=%s encoding=%s sample_rate=%s", stream_sid, call_sid, media_format.encoding, media_format.sample_rate)
                 if events is not None:
-                    await events.publish("call.started", session_id=stream_sid, caller_id=caller_id, call_id=call_sid, channel="voicelink")
+                    await events.publish("call.started", session_id=stream_sid, caller_id=caller_id, call_id=call_sid, channel="voicelink", media_sample_rate=media_format.sample_rate, media_encoding=media_format.encoding)
 
                 # A telephone speaker naturally pauses inside one sentence.
                 # Gnani can deliver each pause as a final transcript, so route
