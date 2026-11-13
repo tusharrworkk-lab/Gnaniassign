@@ -352,6 +352,21 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(judgment["stt_intent_judgment"]["segments"][0]["intent"], "track_order")
         self.assertEqual(store.finalized[2][0]["text"], "Mera order kahan hai")
         self.assertEqual(store.finalized[3][0]["user"], "Mera order kahan hai")
+        self.assertEqual(store.finalized[3][0]["summary"], session.call_turns[0].summary)
+
+    def test_call_summary_uses_only_current_call_turns(self):
+        from gnaniassignment.conversation_analytics import call_summary
+
+        transcript = [
+            {"summary": "Caller asked Tushar to call tomorrow."},
+            {"summary": "Caller asked Tushar to call tomorrow."},
+            {"summary": "Caller clarified the time is six."},
+        ]
+        self.assertEqual(
+            call_summary(transcript),
+            "Caller asked Tushar to call tomorrow. Caller clarified the time is six.",
+        )
+        self.assertIsNone(call_summary([{"user": "hello", "assistant": "hi"}]))
 
     def test_session_preloads_and_refreshes_customer_order_window(self):
         calls = []

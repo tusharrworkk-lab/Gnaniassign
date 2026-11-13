@@ -102,7 +102,8 @@ class TurnSession:
         if self.conversation_store is None:
             return None
         transcript = [
-            {"turn_number": index, "user": turn.query, "assistant": turn.answer, "routed_intent": turn.intent}
+            {"turn_number": index, "user": turn.query, "assistant": turn.answer,
+             "routed_intent": turn.intent, "summary": turn.summary}
             for index, turn in enumerate(self.call_turns, start=1)
         ]
         try:

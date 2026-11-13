@@ -37,6 +37,26 @@ class ConversationRecord:
     flow_flags: list[str]
 
 
+def call_summary(transcript: object, judge_result: object = None) -> str | None:
+    """Build a short call recap from summaries generated during this call."""
+    if not isinstance(transcript, list):
+        return None
+    unique: list[str] = []
+    for turn in transcript[-3:]:
+        if not isinstance(turn, dict):
+            continue
+        summary = turn.get("summary")
+        if isinstance(summary, str) and summary.strip() and summary.strip() not in unique:
+            unique.append(summary.strip())
+    if unique:
+        return " ".join(unique)[:900]
+    if isinstance(judge_result, dict):
+        flow = judge_result.get("conversation_flow_judgment")
+        if isinstance(flow, dict) and isinstance(flow.get("summary"), str):
+            return flow["summary"].strip()[:900] or None
+    return None
+
+
 class ConversationJudge:
     """End-of-call evaluator. Implementations return structured evidence only."""
 
@@ -174,7 +194,7 @@ class PostgresConversationStore:
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT session_id, customer_id, transcript, judge_status, created_at, ended_at
+                SELECT session_id, customer_id, transcript, judge_status, created_at, ended_at, judge_result
                 FROM conversation_calls
                 ORDER BY COALESCE(ended_at, created_at) DESC
                 LIMIT %s
@@ -182,7 +202,7 @@ class PostgresConversationStore:
                 (limit,),
             )
             result = []
-            for session_id, customer_id, transcript, judge_status, created_at, ended_at in cursor.fetchall():
+            for session_id, customer_id, transcript, judge_status, created_at, ended_at, judge_result in cursor.fetchall():
                 turns = transcript if isinstance(transcript, list) else []
                 last = turns[-1] if turns and isinstance(turns[-1], dict) else {}
                 result.append({
@@ -191,6 +211,7 @@ class PostgresConversationStore:
                     "turn_count": len(turns),
                     "last_intent": last.get("routed_intent"),
                     "judge_status": judge_status,
+                    "summary": call_summary(turns, judge_result),
                     "created_at": created_at.isoformat(),
                     "ended_at": ended_at.isoformat() if ended_at else None,
                 })
@@ -228,6 +249,7 @@ class PostgresConversationStore:
         return {
             "session_id": row[0], "customer_id": row[1], "stt_segments": row[2],
             "transcript": row[3], "judge_status": row[4], "judge_result": row[5],
+            "summary": call_summary(row[3], row[5]),
             "created_at": row[6].isoformat(), "ended_at": row[7].isoformat() if row[7] else None,
             "turns": turns,
         }
