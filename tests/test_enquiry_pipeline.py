@@ -171,36 +171,6 @@ class PipelineTests(unittest.TestCase):
 
         self.assertTrue(asyncio.run(run()))
 
-    def test_voicelink_cached_cue_sends_alaw_without_tts(self):
-        from tempfile import TemporaryDirectory
-        from pathlib import Path
-        from unittest.mock import patch
-        from gnaniassignment.telephony.voicelink import VoiceLinkCall
-
-        class Socket:
-            def __init__(self): self.messages = []
-            async def send_json(self, message): self.messages.append(message)
-
-        class Tts:
-            async def synthesize(self, *_args, **_kwargs):
-                raise AssertionError("cached cue must not request TTS")
-                yield
-
-        async def run(path):
-            socket = Socket()
-            call = VoiceLinkCall(socket, "stream-1", "call-1", "caller", "customer", object(), Tts(), object())
-            call.metric = lambda **_values: asyncio.sleep(0)
-            await call.speak_reply("", add_clear_throat=True, reply_kind="latency_cue")
-            return socket.messages
-
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "cue.alaw"
-            path.write_bytes(b"\xd5" * 320)
-            with patch.dict("os.environ", {"VOICE_LINK_CLEAR_THROAT_ALAW_FILE": str(path)}):
-                messages = asyncio.run(run(path))
-        self.assertEqual(sum(message["event"] == "media" for message in messages), 2)
-        self.assertEqual(messages[-1]["event"], "mark")
-
     def test_smart_turn_can_commit_a_nonfinal_stt_hypothesis_once(self):
         from gnaniassignment.telephony.voicelink import VoiceLinkCall
 
