@@ -276,6 +276,73 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(stt.frames[0][:2], b"\x01\x00")
         self.assertEqual(metrics[-1]["audio_enhancement_mode"], "enabled")
 
+    def test_voicelink_wideband_l16_feeds_stt_without_resampling(self):
+        import base64
+        from unittest.mock import patch
+        from gnaniassignment.telephony.voicelink import VoiceLinkCall, VoiceLinkMediaFormat, _call_context
+
+        start = {"start": {"stream_sid": "stream-1", "call_sid": "call-1", "from": "caller",
+                           "media_format": {"encoding": "audio/l16", "sample_rate": "16000"}}}
+        self.assertEqual(_call_context(start)[-1], VoiceLinkMediaFormat("audio/l16", 16000))
+
+        class Stt:
+            sample_rate = 16000
+            frame_bytes = 1024
+
+            def __init__(self): self.frames = []
+            async def send_pcm(self, frame): self.frames.append(frame)
+
+        async def run():
+            stt = Stt()
+            call = VoiceLinkCall(object(), "stream-1", "call-1", "caller", "customer", stt, object(), object(),
+                                 media_format=VoiceLinkMediaFormat("audio/l16", 16000))
+            call.metric = lambda **_values: asyncio.sleep(0)
+            pcm = b"\x10\x27" * 320  # 20 ms of 16 kHz PCM
+            with patch("gnaniassignment.telephony.voicelink.audioop.ratecv", side_effect=AssertionError("resampled")):
+                await call.feed_media(base64.b64encode(pcm).decode("ascii"))
+                await call.feed_media(base64.b64encode(pcm).decode("ascii"))
+            return b"".join(stt.frames)
+
+        self.assertEqual(asyncio.run(run()), (b"\x10\x27" * 640)[:1024])
+
+    def test_voicelink_wideband_outbound_uses_20ms_l16_frames(self):
+        import base64
+        from unittest.mock import patch
+        from gnaniassignment.telephony.voicelink import VoiceLinkCall, VoiceLinkMediaFormat
+
+        class WebSocket:
+            def __init__(self): self.messages = []
+            async def send_json(self, message): self.messages.append(message)
+
+        async def run():
+            socket = WebSocket()
+            call = VoiceLinkCall(socket, "stream-1", "call-1", "caller", "customer", object(),
+                                 type("Tts", (), {"sample_rate": 16000})(), object(),
+                                 media_format=VoiceLinkMediaFormat("audio/l16", 16000))
+            with patch("gnaniassignment.telephony.voicelink.audioop.ratecv", side_effect=AssertionError("resampled")):
+                await call.send_media(b"\x10\x27" * 320)
+            return socket.messages
+
+        messages = asyncio.run(run())
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(base64.b64decode(messages[0]["media"]["payload"]), b"\x10\x27" * 320)
+
+    def test_voicelink_wire_formats_keep_their_actual_frame_size(self):
+        from gnaniassignment.telephony.voicelink import VoiceLinkMediaFormat, _parse_media_format
+
+        for encoding, rate, frame_bytes in (("audio/alaw", 8000, 160), ("audio/ulaw", 8000, 160),
+                                            ("audio/l16", 8000, 320), ("audio/l16", 16000, 640)):
+            with self.subTest(encoding=encoding, rate=rate):
+                fmt = _parse_media_format({"media_format": {"encoding": encoding, "sample_rate": rate}})
+                self.assertEqual(fmt.frame_bytes, frame_bytes)
+                self.assertEqual(len(fmt.encode(b"\x00\x00" * (rate // 50))), frame_bytes)
+        self.assertEqual(
+            _parse_media_format({"media_format": {"encoding": "audio/pcm", "sample_rate": "16000"}}),
+            VoiceLinkMediaFormat("audio/l16", 16000),
+        )
+        with self.assertRaisesRegex(ValueError, "Unsupported VoiceLink media format"):
+            _parse_media_format({"media_format": {"encoding": "audio/alaw", "sample_rate": 16000}})
+
     def test_retail_minilm_switch_uses_configured_fallback(self):
         from unittest.mock import patch
 

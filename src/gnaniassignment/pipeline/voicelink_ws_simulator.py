@@ -2,8 +2,8 @@
 
 This is a development simulator, not a telephony provider replacement. It
 sends VoiceLink's documented ``connected``, ``start``, ``media`` and ``stop``
-events, with A-law 8 kHz audio, so the cloud media adapter can be exercised
-without placing a real phone call.
+events, with a selectable audio format, so the cloud media adapter can be
+exercised without placing a real phone call.
 """
 
 from __future__ import annotations
@@ -18,15 +18,19 @@ from contextlib import suppress
 from uuid import uuid4
 
 
-SAMPLE_RATE = 8000
-PCM_FRAME_BYTES = 320  # 20 ms of 16-bit, mono, 8 kHz PCM.
+MEDIA_FORMATS = {
+    "alaw8k": ("audio/alaw", 8000),
+    "ulaw8k": ("audio/ulaw", 8000),
+    "l16_8k": ("audio/l16", 8000),
+    "l16_16k": ("audio/l16", 16000),
+}
 
 
 def _event(name: str, **payload: object) -> str:
     return json.dumps({"event": name, **payload}, separators=(",", ":"))
 
 
-async def run(url: str, token: str, input_device: str, playback_device: str, customer_id: str, seconds: int | None) -> None:
+async def run(url: str, token: str, input_device: str, playback_device: str, customer_id: str, seconds: int | None, media_format: str = "alaw8k") -> None:
     try:
         import websockets
         from websockets.exceptions import ConnectionClosed
@@ -35,15 +39,17 @@ async def run(url: str, token: str, input_device: str, playback_device: str, cus
 
     stream_sid = f"local-stream-{uuid4()}"
     call_sid = f"local-call-{uuid4()}"
+    encoding, sample_rate = MEDIA_FORMATS[media_format]
+    pcm_frame_bytes = sample_rate * 20 // 1000 * 2
     separator = "&" if "?" in url else "?"
     connect_url = f"{url}{separator}token={token}"
     capture = await asyncio.create_subprocess_exec(
-        "arecord", "-q", "-D", input_device, "-f", "S16_LE", "-c", "1", "-r", str(SAMPLE_RATE), "-t", "raw",
+        "arecord", "-q", "-D", input_device, "-f", "S16_LE", "-c", "1", "-r", str(sample_rate), "-t", "raw",
         *( ["-d", str(seconds)] if seconds is not None else [] ),
         stdout=asyncio.subprocess.PIPE,
     )
     playback = await asyncio.create_subprocess_exec(
-        "aplay", "-q", "-D", playback_device, "-f", "S16_LE", "-c", "1", "-r", str(SAMPLE_RATE), "-t", "raw",
+        "aplay", "-q", "-D", playback_device, "-f", "S16_LE", "-c", "1", "-r", str(sample_rate), "-t", "raw",
         stdin=asyncio.subprocess.PIPE,
     )
     if capture.stdout is None or playback.stdin is None:
@@ -66,7 +72,7 @@ async def run(url: str, token: str, input_device: str, playback_device: str, cus
                     "from": "+910000000000",
                     "to": "+910000000001",
                     "custom_parameters": {"customer_id": customer_id},
-                    "media_format": {"encoding": "audio/alaw", "sample_rate": "8000"},
+                    "media_format": {"encoding": encoding, "sample_rate": str(sample_rate)},
                 },
             ))
 
@@ -75,16 +81,19 @@ async def run(url: str, token: str, input_device: str, playback_device: str, cus
                 sequence = 1
                 while chunk := await capture.stdout.read(4096):
                     buffer.extend(chunk)
-                    while len(buffer) >= PCM_FRAME_BYTES:
-                        pcm = bytes(buffer[:PCM_FRAME_BYTES])
-                        del buffer[:PCM_FRAME_BYTES]
+                    while len(buffer) >= pcm_frame_bytes:
+                        pcm = bytes(buffer[:pcm_frame_bytes])
+                        del buffer[:pcm_frame_bytes]
                         # A laptop microphone otherwise hears its own speaker
                         # playback and creates a synthetic caller/agent loop.
                         if not input_enabled.is_set():
                             continue
-                        alaw = audioop.lin2alaw(pcm, 2)
+                        encoded = (
+                            audioop.lin2alaw(pcm, 2) if encoding == "audio/alaw" else
+                            audioop.lin2ulaw(pcm, 2) if encoding == "audio/ulaw" else pcm
+                        )
                         try:
-                            await websocket.send(_event("media", sequence_number=sequence, media={"track": "inbound", "payload": base64.b64encode(alaw).decode("ascii")}))
+                            await websocket.send(_event("media", sequence_number=sequence, media={"track": "inbound", "payload": base64.b64encode(encoded).decode("ascii")}))
                         except ConnectionClosed:
                             return
                         sequence += 1
@@ -110,7 +119,11 @@ async def run(url: str, token: str, input_device: str, playback_device: str, cus
                     if message.get("event") != "media" or not isinstance(payload, str):
                         continue
                     try:
-                        pcm = audioop.alaw2lin(base64.b64decode(payload, validate=True), 2)
+                        encoded = base64.b64decode(payload, validate=True)
+                        pcm = (
+                            audioop.alaw2lin(encoded, 2) if encoding == "audio/alaw" else
+                            audioop.ulaw2lin(encoded, 2) if encoding == "audio/ulaw" else encoded
+                        )
                     except (ValueError, TypeError):
                         continue
                     input_enabled.clear()
@@ -150,13 +163,15 @@ def main() -> None:
     parser.add_argument("--playback-device", default="default", help="ALSA playback device; inspect with aplay -L")
     parser.add_argument("--customer-id", default="local-voicelink-test")
     parser.add_argument("--seconds", type=int, help="Optional capture duration; omit and press Ctrl+C to stop")
+    parser.add_argument("--media-format", choices=MEDIA_FORMATS, default="alaw8k",
+                        help="Simulated VoiceLink wire format; use l16_16k to exercise the direct 16 kHz path")
     args = parser.parse_args()
     if not args.token:
         parser.error("Set VOICELINK_WS_TOKEN or pass --token")
     if args.seconds is not None and args.seconds <= 0:
         parser.error("--seconds must be positive")
     try:
-        asyncio.run(run(args.url.rstrip("/"), args.token, args.input_device, args.playback_device, args.customer_id, args.seconds))
+        asyncio.run(run(args.url.rstrip("/"), args.token, args.input_device, args.playback_device, args.customer_id, args.seconds, args.media_format))
     except KeyboardInterrupt:
         print("local VoiceLink simulation stopped", flush=True)
 
