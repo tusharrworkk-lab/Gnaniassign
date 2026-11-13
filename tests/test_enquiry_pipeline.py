@@ -710,6 +710,7 @@ class PipelineTests(unittest.TestCase):
         events = asyncio.run(exercise())
         headers = captured["headers"]
         self.assertEqual(captured["endpoint"], "wss://api.vachana.ai/stt/v3/stream")
+        self.assertEqual(headers["model"], "prisma-v3.0")
         self.assertEqual(headers["x-sample-rate"], "16000")
         self.assertEqual(headers["x-min-silence-ms"], "100")
         self.assertEqual(socket.sent, [bytes(PCM_FRAME_BYTES)])
