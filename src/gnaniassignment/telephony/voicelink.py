@@ -493,7 +493,7 @@ class VoiceLinkCall:
         turn_index: int | None = None,
         fragment_index: int | None = None,
         reply_kind: str = "answer",
-    ) -> None:
+    ) -> bool:
         """Synthesize and send one streamed reply with auditable hand-off timing.
 
         VoiceLink documents outbound media as fire-and-forget.  These values
@@ -501,7 +501,7 @@ class VoiceLinkCall:
         no unsupported claim about when the caller's handset played the audio.
         """
         if self.reply_interrupted.is_set():
-            return
+            return False
         self.reply_count += 1
         # Each TTS request is independent speech separated by silence. Carrying
         # resampler filter state across replies can create a click/glitch at a
@@ -540,7 +540,7 @@ class VoiceLinkCall:
                 async for chunk in self.tts.synthesize(text, add_clear_throat=add_clear_throat):
                     if self.reply_interrupted.is_set():
                         self.outbound_buffer.clear()
-                        return
+                        return False
                     audio_chunks += 1
                     if self.tts.last_first_audio_ms is not None:
                         self._active_reply_metrics.setdefault(
@@ -571,7 +571,7 @@ class VoiceLinkCall:
                 raise GnaniTtsError("Gnani TTS completed without producing audio")
             await self.flush_outbound()
             if self.reply_interrupted.is_set():
-                return
+                return False
             self._active_reply_metrics["tts_completed_ms"] = round(
                 (reply_started - self.started_at) * 1000 + (self.tts.last_synthesis_ms or 0), 1
             )
@@ -585,6 +585,7 @@ class VoiceLinkCall:
             self._active_reply_metrics["outbound_mark_sent_ms"] = round((time.perf_counter() - self.started_at) * 1000, 1)
             await self.trace("tts.completed", reply_index=self.reply_count, frames=self._active_reply_metrics["outbound_frames_sent"])
             logger.info("voicelink reply handed off: stream=%s metrics=%s", self.stream_sid, self._active_reply_metrics)
+            return self._active_reply_metrics["outbound_frames_sent"] > 0
         finally:
             if self._active_reply_metrics is not None:
                 snapshot = dict(self._active_reply_metrics)
@@ -618,6 +619,9 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
     the STT receiver for the rest of the telephone call.
     """
     outcome = "completed"
+    generation: asyncio.Task[Any] | None = None
+    answer_fragments = 0
+    all_answer_audio_sent = True
     call.reply_interrupted.clear()
     call.barge_in_active = False
     await call.begin_turn_evaluation()
@@ -662,7 +666,9 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
         def on_chunk(chunk: str) -> None:
             loop.call_soon_threadsafe(chunks.put_nowait, chunk)
 
-        generation = asyncio.create_task(asyncio.to_thread(call.session.ask_stream, stt_event.text, on_chunk))
+        generation = asyncio.create_task(asyncio.to_thread(
+            call.session.ask_stream, stt_event.text, on_chunk, defer_delivery=True,
+        ))
         clear_throat_task = asyncio.create_task(play_proactive_clear_throat())
         pending = ""
         fragment_index = 0
@@ -710,10 +716,12 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
                         "llm.fragment_ready", turn_index=call.turn_index,
                         fragment_index=fragment_index, text_characters=len(fragment),
                     )
-                    await call.speak_reply(
+                    audio_sent = await call.speak_reply(
                         fragment, turn_index=call.turn_index,
                         fragment_index=fragment_index,
                     )
+                    answer_fragments += 1
+                    all_answer_audio_sent = all_answer_audio_sent and audio_sent
                     if call.reply_interrupted.is_set():
                         outcome = "interrupted"
                         break
@@ -725,10 +733,12 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
                     "llm.fragment_ready", turn_index=call.turn_index,
                     fragment_index=fragment_index, text_characters=len(fragment),
                 )
-                await call.speak_reply(
+                audio_sent = await call.speak_reply(
                     fragment, turn_index=call.turn_index,
                     fragment_index=fragment_index,
                 )
+                answer_fragments += 1
+                all_answer_audio_sent = all_answer_audio_sent and audio_sent
         finally:
             if not clear_throat_task.done():
                 clear_throat_task.cancel()
@@ -738,12 +748,26 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
                 pass
         if call.reply_interrupted.is_set():
             outcome = "interrupted"
+        delivery_status = "interrupted" if outcome == "interrupted" else "audio_sent" if answer_fragments and all_answer_audio_sent else "failed"
+        await asyncio.to_thread(call.session.mark_delivery, delivery_status)
+        if isinstance(getattr(call, "active_turn_evaluation", None), dict):
+            call.active_turn_evaluation["delivery_status"] = delivery_status
+        await call.trace("agent.delivery", status=delivery_status, answer_fragments=answer_fragments)
         await call.metric(llm_completed_ms=round((time.perf_counter()-call.started_at)*1000,1))
         await call.trace("llm.completed", intent=result["intent"], response_characters=len(result["spoken"] or ""))
         if events is not None:
-            await events.publish("agent.responded", session_id=call.stream_sid, intent=result["intent"], text=result["spoken"])
+            await events.publish("agent.responded", session_id=call.stream_sid, intent=result["intent"], text=result["spoken"], delivery_status=delivery_status)
     except Exception as error:
         outcome = "failed"
+        if generation is not None and not generation.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(generation), timeout=3)
+            except (Exception, asyncio.CancelledError):
+                pass
+        if not await asyncio.to_thread(call.session.mark_delivery, "failed"):
+            call.session.record_unanswered_request(stt_event.text)
+        if isinstance(getattr(call, "active_turn_evaluation", None), dict):
+            call.active_turn_evaluation["delivery_status"] = "failed"
         # A model may exhaust its reasoning/output budget. The caller should
         # hear a retry prompt and the next final STT segment must still work.
         logger.exception("voicelink turn failed: stream=%s", call.stream_sid)

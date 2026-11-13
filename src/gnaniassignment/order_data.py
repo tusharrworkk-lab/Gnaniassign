@@ -8,6 +8,7 @@ from collections.abc import Callable
 
 
 _ORDER_ID = re.compile(r"\b(?:GRC|ORD)-[A-Z0-9-]{3,}\b", re.I)
+_ORDER_REQUEST = re.compile(r"\b(?:order|refund|payment|delivery|return|cancel)\b", re.I)
 
 
 class PostgresCustomerOrderStore:
@@ -69,8 +70,23 @@ class PostgresCustomerOrderStore:
 def customer_order_window(customer_id: str, store: PostgresCustomerOrderStore | None = None) -> Callable[[str, dict[str, str]], str]:
     """Create the per-call account-window provider after caller identification."""
     resolved_store = store or PostgresCustomerOrderStore()
+    cached_key: tuple[str, ...] | None = None
+    cached_context = ""
 
     def load(query: str, working_memory: dict[str, str]) -> str:
-        return resolved_store.render_order_window(customer_id, query, working_memory.get("order_id"))
+        nonlocal cached_key, cached_context
+        # An explicit ID replaces the older active ID. Ordinary follow-ups
+        # reuse the verified window already fetched for this call.
+        explicit = tuple(dict.fromkeys(match.upper() for match in _ORDER_ID.findall(query)))
+        active = tuple(dict.fromkeys(match.upper() for match in _ORDER_ID.findall(working_memory.get("order_id", ""))))
+        key = explicit or active
+        if key != cached_key:
+            cached_context = resolved_store.render_order_window(
+                customer_id, query if explicit else "", None if explicit else (working_memory.get("order_id") or None),
+            )
+            cached_key = key
+        if cached_context.startswith("No account order records") and not key and not _ORDER_REQUEST.search(query):
+            return ""
+        return cached_context
 
     return load

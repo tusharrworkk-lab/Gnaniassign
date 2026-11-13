@@ -10,3 +10,6 @@ CREATE TABLE IF NOT EXISTS approved_knowledge_chunks (
 
 CREATE INDEX IF NOT EXISTS approved_knowledge_intent_idx
     ON approved_knowledge_chunks (intent, status, priority DESC, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS approved_knowledge_search_idx
+    ON approved_knowledge_chunks USING GIN (to_tsvector('simple', title || ' ' || content));

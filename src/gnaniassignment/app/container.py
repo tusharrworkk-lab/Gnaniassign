@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable
 
 from gnaniassignment.app.config import Settings, load_environment
@@ -127,7 +128,7 @@ def create_customer_order_context(customer_id: str | None) -> str | None:
 
 
 def create_customer_order_window(customer_id: str | None):
-    """Preload a caller-scoped order window before the call, then refresh per turn."""
+    """Preload a caller-scoped order window; refresh for a different order ID."""
     provider = _configured_provider("ORDER_CONTEXT_PROVIDER", ORDER_CONTEXT_FACTORIES)
     if provider == "none" or not customer_id or os.getenv("ORDER_DATA_ENABLED", "false").lower() != "true":
         return None
@@ -151,11 +152,20 @@ def create_calendar_presence_window():
         # Calendar setup must never stop the voice agent from answering.
         return None
 
+    cached_context: str | None = None
+    cached_until = 0.0
+
     def load(_query: str, _working_memory: dict[str, str]) -> str:
+        nonlocal cached_context, cached_until
+        now = time.monotonic()
+        if cached_context is not None and now < cached_until:
+            return cached_context
         try:
-            return calendar_presence_context(store, settings.owner_id)
+            cached_context = calendar_presence_context(store, settings.owner_id)
         except RuntimeError:
-            return "Calendar presence: unavailable. Do not claim the owner's availability."
+            cached_context = "Calendar presence: unavailable. Do not claim the owner's availability."
+        cached_until = now + max(1, int(os.getenv("GOOGLE_CALENDAR_CALL_CACHE_SECONDS", "60")))
+        return cached_context
 
     return load
 
@@ -207,7 +217,7 @@ def combine_account_context_providers(*providers):
         return None
 
     def load(query: str, working_memory: dict[str, str]) -> str:
-        return "\n\n".join(provider(query, working_memory) for provider in active)
+        return "\n\n".join(context for provider in active if (context := provider(query, working_memory)))
 
     return load
 
