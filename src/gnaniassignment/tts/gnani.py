@@ -186,6 +186,7 @@ class GnaniRealtimeTts:
             self.last_synthesis_ms = None
             self.last_audio_chunks = 0
             self.last_audio_bytes = 0
+            data_complete_seen = False
             try:
                 request = json.dumps(self.request(text, add_clear_throat=add_clear_throat, latency_giggle=latency_giggle))
                 try:
@@ -199,7 +200,21 @@ class GnaniRealtimeTts:
                     await self._open_stream()
                     await self._stream.send(request)
                 while True:
-                    raw_message = await self._stream.recv()
+                    try:
+                        if data_complete_seen:
+                            # Production currently emits a second envelope
+                            # `complete` after its documented data-level
+                            # `complete`. Drain it without hanging against a
+                            # server implementation that sends only one.
+                            raw_message = await asyncio.wait_for(self._stream.recv(), timeout=0.25)
+                        else:
+                            raw_message = await self._stream.recv()
+                    except asyncio.TimeoutError:
+                        return
+                    except Exception as error:
+                        if data_complete_seen and type(error).__name__.startswith("ConnectionClosed"):
+                            return
+                        raise
                     if isinstance(raw_message, bytes):
                         raw_message = raw_message.decode("utf-8")
                     try:
@@ -235,7 +250,7 @@ class GnaniRealtimeTts:
                         self.last_audio_chunks += 1
                         self.last_audio_bytes += len(audio)
                         yield GnaniAudioChunk(audio, int(data.get("chunk_index", 0)), final)
-                    if final or event_type == "complete":
-                        return
+                    if event_type == "complete":
+                        data_complete_seen = True
             finally:
                 self.last_synthesis_ms = (time.perf_counter() - started) * 1000
