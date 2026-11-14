@@ -46,8 +46,14 @@ activate a candidate with:
 
 ```bash
 uv run python -m gnaniassignment.pipeline.manage_conversation_rules
-uv run python -m gnaniassignment.pipeline.manage_conversation_rules --activate <rule-id>
+uv run python -m gnaniassignment.pipeline.manage_conversation_rules --activate <rule-id> --priority 40
 ```
+
+For Layer-4/5 real-call evaluations and the turn-level human feedback queue,
+also apply `infra/postgres/voice_production_evals.sql`. The dashboard can ask
+Bedrock for a generalized candidate rule after a reviewed answer, but only an
+admin can edit and activate it with an explicit priority. Candidate generation
+never changes a live prompt.
 
 For local mock order lookups, also apply:
 

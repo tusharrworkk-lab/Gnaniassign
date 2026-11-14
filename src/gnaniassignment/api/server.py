@@ -16,7 +16,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, AsyncIterator
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -73,6 +73,30 @@ class PlaneCommentDraftCreate(BaseModel):
 
 class IntentReviewUpdate(BaseModel):
     intent: str = Field(min_length=1, max_length=64)
+
+
+class RealTelephonyEvalCreate(BaseModel):
+    scenario_id: str = Field(min_length=1, max_length=128)
+    customer_number: str = Field(pattern=r"^[0-9]{10}$")
+
+
+class VoiceEvalHumanReview(BaseModel):
+    verdict: str = Field(pattern=r"^(pass|fail|inconclusive)$")
+    scores: dict[str, int] = Field(default_factory=dict)
+    notes: str | None = Field(default=None, max_length=4000)
+
+
+class VoiceEvalTurnFeedback(BaseModel):
+    decision: str = Field(pattern=r"^(approved|disapproved|never_say_this|reduce_frequency)$")
+    comment: str | None = Field(default=None, max_length=4000)
+
+
+class VoiceEvalRuleReview(BaseModel):
+    decision: str = Field(pattern=r"^(approve|reject)$")
+    priority: int | None = Field(default=None, ge=-10_000, le=10_000)
+    rule_kind: str | None = Field(default=None, pattern=r"^(do|dont)$")
+    rule_text: str | None = Field(default=None, min_length=1, max_length=500)
+    review_note: str | None = Field(default=None, max_length=4000)
 
 
 @dataclass
@@ -406,10 +430,18 @@ def create_app(registry: SessionRegistry | None = None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
         if conversation is None and call_metrics is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
+        production_evaluation = None
+        try:
+            from gnaniassignment.telephony.production_evals import ProductionEvalStore
+            production_evaluation = await asyncio.to_thread(ProductionEvalStore().get_by_session, session_id)
+        except (RuntimeError, ValueError):
+            # Calls remain inspectable when production evals are not configured.
+            pass
         return {
             "conversation": conversation,
             "call_metrics": call_metrics,
             "voice_evaluation": summarize_turns(turns),
+            "production_evaluation": production_evaluation,
         }
 
     @app.post("/v1/dashboard/intent-reviews/{observation_id}")
@@ -436,6 +468,174 @@ def create_app(registry: SessionRegistry | None = None) -> FastAPI:
         from gnaniassignment.telephony.latency import CallLatencyStore
         turns = await asyncio.to_thread(CallLatencyStore().recent_turns, max(1, min(limit, 500)))
         return {"summary": summarize_turns(turns, max(100, min(silent_after_ms, 30000))), "turns": turns}
+
+    @app.get("/v1/dashboard/evals/telephony/scenarios")
+    async def dashboard_telephony_eval_scenarios(x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        """Versioned scripts for human-operated calls over the real PSTN leg."""
+        _require_api_key(x_api_key)
+        from gnaniassignment.telephony.production_evals import SCENARIOS
+        return {"scenarios": [scenario.public() for scenario in SCENARIOS]}
+
+    @app.post("/v1/dashboard/evals/telephony/runs", status_code=status.HTTP_202_ACCEPTED)
+    async def dashboard_start_telephony_eval(payload: RealTelephonyEvalCreate, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        """Queue a real VoiceLink call; the evaluator follows its scenario script."""
+        _require_api_key(x_api_key)
+        from gnaniassignment.telephony.production_evals import SCENARIOS_BY_ID, ProductionEvalStore, VoiceLinkEvalClient, production_eval_enabled
+        if not production_eval_enabled():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Production voice evaluations are disabled")
+        scenario = SCENARIOS_BY_ID.get(payload.scenario_id)
+        if scenario is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evaluation scenario not found")
+        store = ProductionEvalStore()
+        run_id = await asyncio.to_thread(store.create_real_call, scenario)
+        try:
+            provider = await asyncio.to_thread(
+                VoiceLinkEvalClient().queue_eval_call,
+                payload.customer_number,
+                run_id,
+                scenario.id,
+            )
+            await asyncio.to_thread(store.mark_queued, run_id, provider)
+        except Exception as error:
+            await asyncio.to_thread(store.mark_failed, run_id, type(error).__name__)
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"VoiceLink evaluation call could not be queued: {type(error).__name__}") from error
+        await sessions.events.publish("eval.telephony.queued", run_id=run_id, scenario_id=scenario.id)
+        return {"run_id": run_id, "status": "queued", "scenario": scenario.public()}
+
+    @app.get("/v1/dashboard/evals/telephony/runs")
+    async def dashboard_telephony_eval_runs(limit: int = 100, pending_only: bool = False, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        from gnaniassignment.telephony.production_evals import ProductionEvalStore, score_summary
+        runs = await asyncio.to_thread(ProductionEvalStore().recent, max(1, min(limit, 500)), pending_only=pending_only)
+        return {"summary": score_summary(runs), "runs": runs}
+
+    @app.get("/v1/dashboard/evals/telephony/runs/{run_id}")
+    async def dashboard_telephony_eval_run(run_id: str, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        from gnaniassignment.telephony.production_evals import ProductionEvalStore
+        try:
+            UUID(run_id)
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid evaluation run ID") from error
+        run = await asyncio.to_thread(ProductionEvalStore().get, run_id)
+        if run is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evaluation run not found")
+        return run
+
+    @app.post("/v1/dashboard/evals/telephony/runs/{run_id}/sync-provider")
+    async def dashboard_sync_telephony_eval(run_id: str, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        """Fetch VoiceLink recording and final call metadata after processing."""
+        _require_api_key(x_api_key)
+        try:
+            UUID(run_id)
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid evaluation run ID") from error
+        from gnaniassignment.telephony.production_evals import ProductionEvalStore, VoiceLinkEvalClient
+        store = ProductionEvalStore()
+        run = await asyncio.to_thread(store.get, run_id)
+        if run is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evaluation run not found")
+        call_id = run.get("call_sid")
+        if not call_id:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="VoiceLink call ID is not available yet")
+        try:
+            details = await asyncio.to_thread(VoiceLinkEvalClient().call_details, call_id)
+            await asyncio.to_thread(store.attach_provider_details, run_id, details)
+        except Exception as error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"VoiceLink call details unavailable: {type(error).__name__}") from error
+        await sessions.events.publish("eval.telephony.provider_synced", run_id=run_id)
+        return await asyncio.to_thread(store.get, run_id)
+
+    @app.post("/v1/dashboard/evals/telephony/runs/{run_id}/review")
+    async def dashboard_review_telephony_eval(run_id: str, payload: VoiceEvalHumanReview, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        try:
+            UUID(run_id)
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid evaluation run ID") from error
+        allowed_scores = {"task_completion", "context_fidelity", "clarification_quality", "grounded_communication", "conversational_coherence", "naturalness", "conciseness", "persona_consistency", "audio_quality"}
+        if set(payload.scores) - allowed_scores or any(not 0 <= score <= 4 for score in payload.scores.values()):
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Review scores must use known dimensions with values from 0 to 4")
+        from gnaniassignment.telephony.production_evals import ProductionEvalStore
+        updated = await asyncio.to_thread(ProductionEvalStore().review, run_id, payload.verdict, payload.scores, payload.notes)
+        if not updated:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Evaluation run was already reviewed or does not exist")
+        await sessions.events.publish("eval.telephony.reviewed", run_id=run_id, verdict=payload.verdict)
+        return {"run_id": run_id, "reviewed": True, "verdict": payload.verdict}
+
+    @app.post("/v1/dashboard/evals/telephony/runs/{run_id}/turns/{turn_number}/feedback")
+    async def dashboard_review_telephony_turn(run_id: str, turn_number: int, payload: VoiceEvalTurnFeedback, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        """Persist human feedback and generate an inactive, reviewable rule."""
+        _require_api_key(x_api_key)
+        try:
+            UUID(run_id)
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid evaluation run ID") from error
+        if turn_number < 1:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Turn number must be positive")
+        from gnaniassignment.telephony.production_evals import ProductionEvalStore
+        try:
+            feedback = await asyncio.to_thread(
+                ProductionEvalStore().submit_turn_feedback,
+                run_id,
+                turn_number,
+                payload.decision,
+                payload.comment,
+            )
+        except LookupError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+        except Exception as error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Rule proposal generation failed: {type(error).__name__}") from error
+        await sessions.events.publish(
+            "eval.turn.feedback",
+            run_id=run_id,
+            turn_number=turn_number,
+            decision=payload.decision,
+            proposal_status=feedback.get("proposal_status"),
+        )
+        return feedback
+
+    @app.get("/v1/dashboard/evals/rules")
+    async def dashboard_eval_rule_candidates(rule_status: str = Query(default="candidate", alias="status"), limit: int = 100, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        from gnaniassignment.telephony.production_evals import ProductionEvalStore
+        try:
+            rules = await asyncio.to_thread(
+                ProductionEvalStore().recent_rule_candidates,
+                max(1, min(limit, 500)),
+                status=rule_status,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+        return {"status": rule_status, "rules": rules}
+
+    @app.post("/v1/dashboard/evals/rules/{rule_id}/review")
+    async def dashboard_review_eval_rule(rule_id: int, payload: VoiceEvalRuleReview, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+        """Admin-only activation gate; generation never activates a rule."""
+        _require_api_key(x_api_key)
+        if payload.decision == "approve" and payload.priority is None:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="An explicit priority is required to activate a rule")
+        from gnaniassignment.telephony.production_evals import ProductionEvalStore
+        try:
+            rule = await asyncio.to_thread(
+                ProductionEvalStore().review_rule_candidate,
+                rule_id,
+                payload.decision,
+                priority=payload.priority,
+                rule_kind=payload.rule_kind,
+                rule_text=payload.rule_text,
+                review_note=payload.review_note,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+        if rule is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Rule is not an active candidate")
+        await sessions.events.publish("eval.rule.reviewed", rule_id=rule_id, decision=payload.decision, priority=rule.get("priority"))
+        return rule
 
     @app.get("/v1/integrations/google-calendar/connect")
     async def google_calendar_connect(x_api_key: str | None = Header(default=None)) -> dict[str, str]:

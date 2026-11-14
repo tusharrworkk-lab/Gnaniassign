@@ -236,6 +236,19 @@ class TurnSession:
         except Exception as error:
             judge_result = {"judge_error": type(error).__name__, "message": str(error)[:500]}
         self.conversation_store.finalize_call(self.session_id, self.customer_id, self.stt_segments, transcript, judge_result)
+        # Layer-4 eval calls are always queued for human review. Ordinary
+        # production calls are sampled deterministically and escalated when
+        # the judge or delivery evidence identifies a probable failure.
+        try:
+            from gnaniassignment.telephony.production_evals import ProductionEvalStore, production_eval_enabled
+            if production_eval_enabled():
+                ProductionEvalStore().observe_completed_call(
+                    self.session_id, self.customer_id, transcript, judge_result,
+                )
+        except Exception:
+            # Evaluation storage is post-call and must never break call
+            # finalization or the durable conversation record.
+            logger.exception("Could not enqueue production evaluation for session %s", self.session_id)
         if self.tracer is not None and judge_result is not None:
             self.tracer.emit_call_judgment(self.session_id, judge_result)
         return judge_result
