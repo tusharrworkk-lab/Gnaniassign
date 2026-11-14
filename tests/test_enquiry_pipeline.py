@@ -364,6 +364,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Never claim to be the owner or a human", GENERIC_PROMPT)
         self.assertIn("explicitly authorized", GENERIC_PROMPT)
         self.assertIn("FIRST-REPLY DISCLOSURE", GENERIC_PROMPT)
+        self.assertIn("You cannot place a call to Tushar", GENERIC_PROMPT)
 
     def test_personal_assistant_prompt_requires_feminine_first_person_hinglish(self):
         self.assertIn("FEMALE PERSONA", GENERIC_PROMPT)

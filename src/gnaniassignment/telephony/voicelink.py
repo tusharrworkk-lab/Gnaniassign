@@ -622,6 +622,7 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
     generation: asyncio.Task[Any] | None = None
     answer_fragments = 0
     all_answer_audio_sent = True
+    handed_off_fragments: list[str] = []
     call.reply_interrupted.clear()
     call.barge_in_active = False
     await call.begin_turn_evaluation()
@@ -722,6 +723,8 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
                     )
                     answer_fragments += 1
                     all_answer_audio_sent = all_answer_audio_sent and audio_sent
+                    if audio_sent:
+                        handed_off_fragments.append(fragment)
                     if call.reply_interrupted.is_set():
                         outcome = "interrupted"
                         break
@@ -739,6 +742,8 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
                 )
                 answer_fragments += 1
                 all_answer_audio_sent = all_answer_audio_sent and audio_sent
+                if audio_sent:
+                    handed_off_fragments.append(fragment)
         finally:
             if not clear_throat_task.done():
                 clear_throat_task.cancel()
@@ -749,7 +754,11 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
         if call.reply_interrupted.is_set():
             outcome = "interrupted"
         delivery_status = "interrupted" if outcome == "interrupted" else "audio_sent" if answer_fragments and all_answer_audio_sent else "failed"
-        await asyncio.to_thread(call.session.mark_delivery, delivery_status)
+        handed_off_text = " ".join(handed_off_fragments)
+        if delivery_status in {"interrupted", "failed"} and handed_off_text:
+            await asyncio.to_thread(call.session.mark_delivery, delivery_status, handed_off_text=handed_off_text)
+        else:
+            await asyncio.to_thread(call.session.mark_delivery, delivery_status)
         if isinstance(getattr(call, "active_turn_evaluation", None), dict):
             call.active_turn_evaluation["delivery_status"] = delivery_status
         await call.trace("agent.delivery", status=delivery_status, answer_fragments=answer_fragments)
@@ -764,7 +773,11 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
                 await asyncio.wait_for(asyncio.shield(generation), timeout=3)
             except (Exception, asyncio.CancelledError):
                 pass
-        if not await asyncio.to_thread(call.session.mark_delivery, "failed"):
+        handed_off_text = " ".join(handed_off_fragments)
+        marked = await asyncio.to_thread(
+            call.session.mark_delivery, "failed", handed_off_text=handed_off_text,
+        ) if handed_off_text else await asyncio.to_thread(call.session.mark_delivery, "failed")
+        if not marked:
             call.session.record_unanswered_request(stt_event.text)
         if isinstance(getattr(call, "active_turn_evaluation", None), dict):
             call.active_turn_evaluation["delivery_status"] = "failed"
@@ -780,6 +793,68 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
             logger.exception("voicelink fallback speech failed: stream=%s", call.stream_sid)
     finally:
         await call.finish_turn_evaluation(outcome)
+
+
+async def _collect_turn_segments(
+    turns: asyncio.Queue[VoiceTranscript],
+    endpoint: asyncio.Event,
+    *,
+    endpoint_mode: bool,
+    coalesce_ms: int,
+    grace_ms: float,
+    provider_final_grace_ms: int = 250,
+) -> list[VoiceTranscript]:
+    """Collect a turn without waiting for a final STT result twice.
+
+    Endpoint mode retains a grace window only for a non-final hypothesis.
+    Without endpoint mode, keep the existing provider-final coalescing policy.
+    """
+    segments = [await turns.get()]
+
+    def add_segment(segment: VoiceTranscript) -> None:
+        previous = segments[-1]
+        if segment.segment_id is not None and previous.segment_id is not None:
+            same_segment = segment.segment_id == previous.segment_id
+        else:
+            same_segment = (
+                segment.segment_index is not None
+                and segment.segment_index == previous.segment_index
+            )
+        if segment.is_final and not previous.is_final and same_segment:
+            segments[-1] = segment
+        else:
+            segments.append(segment)
+
+    while True:
+        wait_seconds = _turn_wait_seconds(
+            segments[-1], coalesce_ms=coalesce_ms,
+            provider_final_grace_ms=provider_final_grace_ms,
+            vad_mode="endpoint" if endpoint_mode else "off",
+        )
+        get_segment = asyncio.create_task(turns.get())
+        endpoint_wait = asyncio.create_task(endpoint.wait()) if endpoint_mode else None
+        waiters: set[asyncio.Task[Any]] = {get_segment}
+        if endpoint_wait is not None:
+            waiters.add(endpoint_wait)
+        done, pending = await asyncio.wait(
+            waiters, timeout=wait_seconds,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for waiter in pending:
+            waiter.cancel()
+        if not done:
+            break
+        if get_segment in done:
+            add_segment(get_segment.result())
+            continue
+        if segments[-1].is_final:
+            break
+        try:
+            add_segment(await asyncio.wait_for(turns.get(), timeout=grace_ms / 1000))
+        except asyncio.TimeoutError:
+            pass
+        break
+    return segments
 
 
 async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = None) -> None:
@@ -869,50 +944,20 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                 async def process_turns() -> None:
                     assert call is not None
                     while True:
-                        first = await turns.get()
-                        segments = [first]
-                        while True:
-                            # Wait for either a new STT segment or an endpoint
-                            # decision. Smart Turn's result must wake this
-                            # worker; otherwise a semantic completion would
-                            # still pay the legacy coalescing timeout.
-                            wait_seconds = _turn_wait_seconds(
-                                first,
-                                coalesce_ms=coalesce_ms,
-                                provider_final_grace_ms=provider_final_grace_ms,
-                                vad_mode=call.vad_mode,
-                            )
-                            get_segment = asyncio.create_task(turns.get())
-                            endpoint_wait: asyncio.Task[bool] | None = None
-                            waiters: set[asyncio.Task[Any]] = {get_segment}
-                            if call.vad_mode == "endpoint":
-                                endpoint_wait = asyncio.create_task(call.vad_turn_ended.wait())
-                                waiters.add(endpoint_wait)
-                            done, pending = await asyncio.wait(
-                                waiters,
-                                timeout=wait_seconds,
-                                return_when=asyncio.FIRST_COMPLETED,
-                            )
-                            for waiter in pending:
-                                waiter.cancel()
-                            if not done:
-                                break
-                            if get_segment in done:
-                                segments.append(get_segment.result())
-                                continue
-                            # A semantic completion gets a tiny grace window
-                            # for any STT final already in flight, then commits.
-                            try:
-                                segments.append(await asyncio.wait_for(turns.get(), timeout=float(os.getenv("VOICE_LINK_VAD_ENDPOINT_GRACE_MS", "250")) / 1000))
-                            except asyncio.TimeoutError:
-                                pass
-                            break
+                        segments = await _collect_turn_segments(
+                            turns, call.vad_turn_ended,
+                            endpoint_mode=call.vad_mode == "endpoint",
+                            coalesce_ms=coalesce_ms,
+                            grace_ms=float(os.getenv("VOICE_LINK_VAD_ENDPOINT_GRACE_MS", "250")),
+                            provider_final_grace_ms=provider_final_grace_ms,
+                        )
                         combined = VoiceTranscript(
                             text=" ".join(segment.text.strip() for segment in segments if segment.text.strip()),
                             segment_id=segments[-1].segment_id,
                             segment_index=segments[-1].segment_index,
                             audio_duration_ms=sum(segment.audio_duration_ms or 0 for segment in segments) or None,
                             latency_ms=segments[-1].latency_ms,
+                            is_final=segments[-1].is_final,
                         )
                         if not combined.text:
                             continue
