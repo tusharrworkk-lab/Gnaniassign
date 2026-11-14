@@ -27,6 +27,7 @@ class TurnState(TypedDict):
     history: list[ChatTurn]
     prior_call_context: list[ChatTurn]
     current_call_history: list[ChatTurn]
+    call_memo: str
     working_memory: dict[str, str]
     account_context: str
     memory: str
@@ -87,9 +88,10 @@ def build_graph(
         # Never inject an older call into the model prompt. The generic agent
         # can access it only through its explicit read-only memory_recall tool.
         prior_memory: list[ChatTurn] = []
-        # Active conversation turns are compulsory context; past-call context
-        # remains small and relevance-filtered.
-        active_memory = state["current_call_history"][-3:]
+        # The rolling memo carries the complete call state. Keep only the
+        # latest audible exchange beside it for immediate conversational cues
+        # such as "haan" or a correction, avoiding repeated prompt history.
+        active_memory = state["current_call_history"][-1:]
         recall_availability = (
             "Prior-call memory: available only through the memory_recall tool."
             if state["prior_call_context"]
@@ -100,7 +102,7 @@ def build_graph(
             "intent": intent,
             "topic": topic,
             "working_memory": working_memory,
-            "memory": render_working_memory(working_memory) + "\n\n" + state["account_context"] + "\n\n" + call_status + "\n\n" + recall_availability + "\n\nCurrent call context:\n" + render_memory(active_memory) + "\n\nRelevant prior-call context:\n" + render_memory(prior_memory),
+            "memory": render_working_memory(working_memory) + "\n\n" + state["account_context"] + "\n\n" + call_status + "\n\n" + recall_availability + "\n\nCall working memo (concise state of this open call):\n" + state["call_memo"] + "\n\nCurrent call context:\n" + render_memory(active_memory) + "\n\nRelevant prior-call context:\n" + render_memory(prior_memory),
             "metrics": {"intent_ms": (time.perf_counter() - started) * 1000},
         }
 
