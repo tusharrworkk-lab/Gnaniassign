@@ -302,20 +302,34 @@ class VoiceLinkCall:
                 **values,
             )
 
-    async def send_media(self, pcm: bytes) -> None:
-        """Convert linear TTS PCM to the negotiated outbound media format."""
-        if not pcm or self.reply_interrupted.is_set():
+    async def send_media(self, audio: bytes) -> None:
+        """Packetize TTS audio in the negotiated VoiceLink wire format.
+
+        Native Gnani A-law is passed through unchanged for VoiceLink's
+        documented 8 kHz A-law stream. Other format pairs retain the existing
+        decode/resample/encode fallback.
+        """
+        if not audio or self.reply_interrupted.is_set():
             return
-        if self.tts.sample_rate == self.media_format.sample_rate:
-            converted = pcm
+        tts_encoding = getattr(self.tts, "output_encoding", "audio/l16")
+        if tts_encoding == self.media_format.encoding and self.tts.sample_rate == self.media_format.sample_rate:
+            wire_audio = audio
         else:
-            converted, self.output_resample_state = audioop.ratecv(
-                pcm, PCM_WIDTH, 1, self.tts.sample_rate,
-                self.media_format.sample_rate, self.output_resample_state,
-            )
-        if not converted:
-            return
-        self.outbound_buffer.extend(self.media_format.encode(converted))
+            if tts_encoding == "audio/alaw":
+                pcm = audioop.alaw2lin(audio, PCM_WIDTH)
+            elif tts_encoding == "audio/ulaw":
+                pcm = audioop.ulaw2lin(audio, PCM_WIDTH)
+            else:
+                pcm = audio
+            if self.tts.sample_rate != self.media_format.sample_rate:
+                pcm, self.output_resample_state = audioop.ratecv(
+                    pcm, PCM_WIDTH, 1, self.tts.sample_rate,
+                    self.media_format.sample_rate, self.output_resample_state,
+                )
+            if not pcm:
+                return
+            wire_audio = self.media_format.encode(pcm)
+        self.outbound_buffer.extend(wire_audio)
         frame_bytes = self.media_format.frame_bytes
         while len(self.outbound_buffer) >= frame_bytes:
             frame = bytes(self.outbound_buffer[:frame_bytes])
@@ -924,8 +938,23 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                     call.vad_mode = vad_mode
                     call.vad_backend = backend
                 call.latency_store = CallLatencyStore() if os.getenv("CALL_LATENCY_METRICS_ENABLED", "true").lower() == "true" else None
-                await call.metric(call_started=True, media_sample_rate=media_format.sample_rate, media_encoding=media_format.encoding)
-                logger.info("voicelink call started: stream=%s call=%s encoding=%s sample_rate=%s", stream_sid, call_sid, media_format.encoding, media_format.sample_rate)
+                await call.metric(
+                    call_started=True,
+                    media_sample_rate=media_format.sample_rate,
+                    media_encoding=media_format.encoding,
+                    tts_sample_rate=tts.sample_rate,
+                    tts_encoding=tts.output_encoding,
+                    tts_passthrough=(
+                        tts.sample_rate == media_format.sample_rate
+                        and tts.output_encoding == media_format.encoding
+                    ),
+                )
+                logger.info(
+                    "voicelink call started: stream=%s call=%s media=%s/%s tts=%s/%s passthrough=%s",
+                    stream_sid, call_sid, media_format.encoding, media_format.sample_rate,
+                    tts.output_encoding, tts.sample_rate,
+                    tts.sample_rate == media_format.sample_rate and tts.output_encoding == media_format.encoding,
+                )
                 if events is not None:
                     await events.publish("call.started", session_id=stream_sid, caller_id=caller_id, call_id=call_sid, channel="voicelink", media_sample_rate=media_format.sample_rate, media_encoding=media_format.encoding)
 

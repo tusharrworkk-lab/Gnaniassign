@@ -20,7 +20,7 @@ async def speak(
     latency_giggle: bool = False,
     playback_gate: asyncio.Event | None = None,
 ) -> dict[str, float | int | None]:
-    """Stream Gnani raw PCM into ALSA ``aplay`` as it arrives.
+    """Stream Gnani audio into ALSA ``aplay`` as it arrives.
 
     ``playback_gate`` lets synthesis run while another short cue is audible.
     PCM is buffered only until the gate opens, so the reply can start directly
@@ -33,7 +33,8 @@ async def speak(
         command = ["aplay", "-q"]
         if device:
             command.extend(["-D", device])
-        command.extend(["-f", "S16_LE", "-c", "1", "-r", str(tts.sample_rate), "-t", "raw"])
+        alsa_format = "A_LAW" if getattr(tts, "output_encoding", "audio/l16") == "audio/alaw" else "S16_LE"
+        command.extend(["-f", alsa_format, "-c", "1", "-r", str(tts.sample_rate), "-t", "raw"])
         player = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE)
         if player.stdin is None:
             raise RuntimeError("Could not open ALSA playback input")
@@ -77,7 +78,7 @@ async def speak(
             "tts_synthesis_ms": tts.last_synthesis_ms,
             "tts_audio_chunks": tts.last_audio_chunks,
             "tts_audio_bytes": tts.last_audio_bytes,
-            "tts_audio_duration_ms": (tts.last_audio_bytes / (tts.sample_rate * 2)) * 1000,
+            "tts_audio_duration_ms": (tts.last_audio_bytes / (tts.sample_rate * tts.bytes_per_sample)) * 1000,
             "playback_first_write_ms": first_playback_ms,
         }
 
