@@ -59,6 +59,28 @@ export function fetchDashboardCall(sessionId) {
   return request(`/v1/dashboard/calls/${encodeURIComponent(sessionId)}`);
 }
 
+export function submitVoiceTurnFeedback(runId, turnNumber, { decision, comment }) {
+  return request(`/v1/dashboard/evals/telephony/runs/${encodeURIComponent(runId)}/turns/${turnNumber}/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decision, comment: comment || null }),
+  });
+}
+
+export function reviewVoiceRule(ruleId, { decision, priority, ruleKind, ruleText, reviewNote }) {
+  return request(`/v1/dashboard/evals/rules/${encodeURIComponent(ruleId)}/review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      decision,
+      priority: decision === "approve" ? Number(priority) : null,
+      rule_kind: ruleKind || null,
+      rule_text: ruleText || null,
+      review_note: reviewNote || null,
+    }),
+  });
+}
+
 export function reviewIntent(observationId, intent) {
   return request(`/v1/dashboard/intent-reviews/${encodeURIComponent(observationId)}`, {
     method: "POST",

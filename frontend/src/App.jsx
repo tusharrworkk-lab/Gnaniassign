@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { appendPromptNode, createHarnessConversation, createGoogleCalendarConnectUrl, dashboardApiConfigured, dashboardDemo, disconnectGoogleCalendar, endHarnessConversation, fetchDashboardCall, fetchDashboardOverview, fetchGoogleCalendarStatus, fetchHarnessConversation, fetchPromptPlan, hasDashboardAccess, reviewIntent, saveDashboardAccessKey, sendHarnessTurn, streamRuntimeEvents } from "./api/client";
+import { appendPromptNode, createHarnessConversation, createGoogleCalendarConnectUrl, dashboardApiConfigured, dashboardDemo, disconnectGoogleCalendar, endHarnessConversation, fetchDashboardCall, fetchDashboardOverview, fetchGoogleCalendarStatus, fetchHarnessConversation, fetchPromptPlan, hasDashboardAccess, reviewIntent, reviewVoiceRule, saveDashboardAccessKey, sendHarnessTurn, streamRuntimeEvents, submitVoiceTurnFeedback } from "./api/client";
 
 const iconPaths = {
   home: <><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1Z" /></>,
@@ -343,7 +343,42 @@ function CallDetailView({ detail, loading, onClose }) {
   const conversation = detail?.conversation;
   const turns = conversation?.turns || [];
   const evaluation = detail?.voice_evaluation || {};
-  return <section className="tab-page call-detail-view"><button className="plain-link" onClick={onClose}>‹ Back to calls</button><div className="activity-heading"><div><h2>Call conversation</h2><p className="page-intro">{callerLabel(conversation?.customer_id)} · {relativeTime(conversation?.ended_at || conversation?.created_at)}</p></div><StatusPill tone={conversation?.judge_status === "completed" ? "mint" : "slate"}>{conversation?.judge_status || "Recorded"}</StatusPill></div><section className="call-summary"><span>Call summary</span><p>{conversation?.summary || "No summary is available for this call."}</p></section><div className="call-transcript">{turns.length ? turns.map((turn) => <article key={turn.turn_number} className="transcript-pair"><p className="transcript-user"><span>Caller</span>{turn.user}</p><p className="transcript-agent"><span>Relay</span>{turn.assistant}</p><small>{turn.final_intent || turn.classifier_intent || turn.routed_intent || "generic"}{turn.flow_flags?.length ? ` · ${turn.flow_flags.join(", ")}` : ""}</small></article>) : <div className="event-empty"><strong>No turn pairs were stored</strong><p>This call may predate conversation logging.</p></div>}</div><section className="turn-metrics"><h3>Voice evaluation</h3><p>First audio p50: {evaluation.first_audible_reply_proxy?.p50_ms ?? "—"} ms · silent turns: {evaluation.silent_turns ?? "—"}</p><p>Barge-in p50: {evaluation.barge_in_stop_latency?.p50_ms ?? "—"} ms</p></section></section>;
+  const productionEval = detail?.production_evaluation;
+  const feedbackByTurn = Object.fromEntries((productionEval?.turn_feedback || []).map((item) => [item.turn_number, item]));
+  return <section className="tab-page call-detail-view"><button className="plain-link" onClick={onClose}>‹ Back to calls</button><div className="activity-heading"><div><h2>Call conversation</h2><p className="page-intro">{callerLabel(conversation?.customer_id)} · {relativeTime(conversation?.ended_at || conversation?.created_at)}</p></div><StatusPill tone={conversation?.judge_status === "completed" ? "mint" : "slate"}>{conversation?.judge_status || "Recorded"}</StatusPill></div><section className="call-summary"><span>Call summary</span><p>{conversation?.summary || "No summary is available for this call."}</p></section>{productionEval && <p className="review-disclosure">Human review is attached to eval run {productionEval.id.slice(0, 8)}. Generated rules stay inactive until you approve a priority.</p>}<div className="call-transcript">{turns.length ? turns.map((turn) => <article key={turn.turn_number} className="transcript-pair"><p className="transcript-user"><span>Caller</span>{turn.user}</p><p className="transcript-agent"><span>Relay · {turn.delivery_status || "recorded"}</span>{turn.assistant || <em>No assistant audio was handed off.</em>}</p><small>{turn.final_intent || turn.classifier_intent || turn.routed_intent || "generic"}{turn.flow_flags?.length ? ` · ${turn.flow_flags.join(", ")}` : ""}</small>{productionEval && <TurnFeedbackPanel runId={productionEval.id} turn={turn} initial={feedbackByTurn[turn.turn_number]} />}</article>) : <div className="event-empty"><strong>No turn pairs were stored</strong><p>This call may predate conversation logging.</p></div>}</div><section className="turn-metrics"><h3>Voice evaluation</h3><p>First audio p50: {evaluation.first_audible_reply_proxy?.p50_ms ?? "—"} ms · silent turns: {evaluation.silent_turns ?? "—"}</p><p>Barge-in p50: {evaluation.barge_in_stop_latency?.p50_ms ?? "—"} ms</p></section></section>;
+}
+
+function TurnFeedbackPanel({ runId, turn, initial }) {
+  const [feedback, setFeedback] = useState(initial || null);
+  const [decision, setDecision] = useState(initial?.decision || "");
+  const [comment, setComment] = useState(initial?.comment || "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const candidate = feedback?.candidate_rule;
+  const [ruleKind, setRuleKind] = useState(candidate?.kind || "do");
+  const [ruleText, setRuleText] = useState(candidate?.text || "");
+  const [priority, setPriority] = useState(candidate?.priority ?? 100);
+  useEffect(() => {
+    if (candidate) { setRuleKind(candidate.kind); setRuleText(candidate.text); setPriority(candidate.priority); }
+  }, [candidate?.kind, candidate?.text, candidate?.priority]);
+  const submit = async () => {
+    if (!decision) return;
+    setBusy(true); setError("");
+    try { setFeedback(await submitVoiceTurnFeedback(runId, turn.turn_number, { decision, comment })); }
+    catch (requestError) { setError(requestError.message); }
+    finally { setBusy(false); }
+  };
+  const reviewRule = async (ruleDecision) => {
+    setBusy(true); setError("");
+    try {
+      const rule = await reviewVoiceRule(feedback.candidate_rule_id, { decision: ruleDecision, priority, ruleKind, ruleText, reviewNote: comment });
+      setFeedback((current) => ({ ...current, proposal_status: rule.status === "active" ? "approved" : "rejected", candidate_rule: { kind: rule.rule_kind, text: rule.rule_text, priority: rule.priority, status: rule.status } }));
+    } catch (requestError) { setError(requestError.message); }
+    finally { setBusy(false); }
+  };
+  return <section className="turn-feedback" aria-label={`Review answer ${turn.turn_number}`}><strong>Answer quality</strong><div className="feedback-options">{[
+    ["approved", "Approved"], ["disapproved", "Disapproved"], ["never_say_this", "Never say this"], ["reduce_frequency", "Reduce frequency"],
+  ].map(([value, label]) => <button key={value} className={decision === value ? "selected" : ""} onClick={() => setDecision(value)} disabled={busy || feedback?.proposal_status === "approved"}>{label}</button>)}</div><textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Optional: explain what should change or be preserved" disabled={busy || feedback?.proposal_status === "approved"} /><button className="compact-primary" onClick={submit} disabled={!decision || busy || feedback?.proposal_status === "approved"}>{busy ? "Working…" : feedback ? "Update review" : "Save review"}</button>{error && <p className="feedback-error">{error}</p>}{feedback?.proposal_status === "not_requested" && <p className="feedback-note">Saved as positive evidence. Add a comment if you want a reusable positive rule proposed.</p>}{candidate && <div className="rule-candidate"><span>LLM-proposed rule · inactive</span><select value={ruleKind} onChange={(event) => setRuleKind(event.target.value)} disabled={candidate.status !== "candidate" || busy} aria-label="Rule kind"><option value="do">Do</option><option value="dont">Do not</option></select><textarea value={ruleText} onChange={(event) => setRuleText(event.target.value)} disabled={candidate.status !== "candidate" || busy} /><label>Priority <input type="number" min="-10000" max="10000" value={priority} onChange={(event) => setPriority(event.target.value)} disabled={candidate.status !== "candidate" || busy} /></label>{feedback.proposal_reason && <p>{feedback.proposal_reason}</p>}{candidate.status === "candidate" ? <div className="rule-actions"><button className="compact-primary" onClick={() => reviewRule("approve")} disabled={busy}>Approve & activate</button><button className="outline-action" onClick={() => reviewRule("reject")} disabled={busy}>Reject</button></div> : <StatusPill tone={candidate.status === "active" ? "mint" : "slate"}>{candidate.status}</StatusPill>}</div>}</section>;
 }
 function SettingsView({ instructionNodes, setInstructionNodes, preCallTools, setPreCallTools, promptVersion, promptRuntimeEnabled, isLive, savingInstruction, onAddInstruction, onNotice }) {
   const [section, setSection] = useState("instructions");

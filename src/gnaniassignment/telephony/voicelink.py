@@ -688,6 +688,12 @@ def _call_context(payload: dict[str, Any]) -> tuple[str, str, str, str, VoiceLin
         raise ValueError("VoiceLink start event requires stream_sid and call_sid")
     media_format = _parse_media_format(start)
     custom = start.get("custom_parameters")
+    if isinstance(custom, str):
+        try:
+            decoded_custom = json.loads(custom)
+        except json.JSONDecodeError:
+            decoded_custom = None
+        custom = decoded_custom if isinstance(decoded_custom, dict) else None
     customer_id = custom.get("customer_id") if isinstance(custom, dict) else None
     return stream_sid, call_sid, caller_id, str(customer_id or f"caller:{caller_id}"), media_format
 
@@ -1012,6 +1018,12 @@ async def handle_voicelink_websocket(websocket: WebSocket, events: Any | None = 
                 await stt.__aenter__()
                 await tts.__aenter__()
                 call = VoiceLinkCall(websocket, stream_sid, call_sid, caller_id, customer_id, stt, tts, create_session(customer_id=customer_id, session_id=stream_sid), media_format=media_format)
+                if os.getenv("VOICE_PRODUCTION_EVALS_ENABLED", "false").lower() in {"1", "true", "yes", "on"}:
+                    try:
+                        from gnaniassignment.telephony.production_evals import ProductionEvalStore
+                        await asyncio.to_thread(ProductionEvalStore().attach_call, customer_id, stream_sid, call_sid)
+                    except Exception:
+                        logger.exception("Could not correlate VoiceLink evaluation call: stream=%s", stream_sid)
                 call.events = events
                 call.audio_enhancer = create_audio_enhancer(call.stt.sample_rate)
                 # New generic settings supersede the legacy Silero-only

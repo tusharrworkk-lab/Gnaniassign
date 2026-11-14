@@ -51,3 +51,8 @@ CREATE TABLE IF NOT EXISTS conversation_pattern_rules (
 
 CREATE INDEX IF NOT EXISTS conversation_pattern_rules_status_idx
     ON conversation_pattern_rules (status, created_at DESC);
+
+ALTER TABLE conversation_pattern_rules
+    ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 100,
+    ADD COLUMN IF NOT EXISTS source_feedback_id UUID,
+    ADD COLUMN IF NOT EXISTS review_note TEXT;

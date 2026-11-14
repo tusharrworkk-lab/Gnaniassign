@@ -370,6 +370,18 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported VoiceLink media format"):
             _parse_media_format({"media_format": {"encoding": "audio/alaw", "sample_rate": 16000}})
 
+    def test_voicelink_accepts_json_string_custom_parameters_for_eval_correlation(self):
+        from gnaniassignment.telephony.voicelink import _call_context
+
+        payload = {
+            "start": {
+                "stream_sid": "stream-eval", "call_sid": "call-eval", "from": "9876543210",
+                "media_format": {"encoding": "audio/l16", "sample_rate": 16000},
+                "custom_parameters": '{"customer_id":"voice-eval:run-1","eval_run_id":"run-1"}',
+            }
+        }
+        self.assertEqual(_call_context(payload)[3], "voice-eval:run-1")
+
     def test_retail_minilm_switch_uses_configured_fallback(self):
         from unittest.mock import patch
 
