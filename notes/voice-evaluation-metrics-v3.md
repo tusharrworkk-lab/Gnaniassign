@@ -22,15 +22,17 @@ count as the answer. The API reports how many legacy rows were excluded.
   total stream time and provider token usage when Bedrock returns it.
 - TTS: decoded text to first speakable fragment, reconnect time, Gnani TTFA,
   zero-audio retries and reconnects.
-- Telephony: first cue frame and first answer frame separately, first answer
+- Telephony: first response frame and first real answer frame separately, first answer
   frame hand-off, frame-gap p50/p95/max across every answer fragment, and media
   duration derived from 20 ms frames.
 - Reliability: model/JSON/TTS failures, silence, interruption and partial
   delivery.
 
-`first_answer_audio_ms` ends when this server hands the first answer media frame
-to VoiceLink. It is not handset playback time because VoiceLink does not expose
-that acknowledgement. `first_cue_audio_ms` never satisfies the answer SLO.
+`first_answer_audio_ms` is the earliest response audio and therefore includes a
+clear-throat cue when one is emitted. `first_real_answer_audio_ms` ends when the
+server hands the first spoken-answer frame to VoiceLink. Neither proves handset
+playback because VoiceLink does not expose that acknowledgement. Silent-turn
+evaluation uses `first_real_answer_audio_ms`, so a cue cannot hide a lost answer.
 
 ## Screening signals
 

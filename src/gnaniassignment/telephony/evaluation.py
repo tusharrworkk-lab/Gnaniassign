@@ -97,7 +97,7 @@ def conversation_quality_flags(
 def summarize_turns(records: Iterable[dict[str, Any]], silent_after_ms: int = 2500) -> dict[str, Any]:
     """Summarize metadata-only live or replayed voice-turn records.
 
-    ``first_answer_audio_ms`` is a server-to-telephony hand-off proxy. A
+    ``first_real_answer_audio_ms`` is a server-to-telephony hand-off proxy. A
     telephone provider does not report actual handset playback, so this module
     never labels it as caller-heard audio.
     """
@@ -125,14 +125,14 @@ def summarize_turns(records: Iterable[dict[str, Any]], silent_after_ms: int = 25
     silent = [
         row for row in completed
         if row.get("silent_turn") is True
-        or not isinstance(row.get("first_answer_audio_ms"), (int, float))
-        or row["first_answer_audio_ms"] > silent_after_ms
+        or not isinstance(row.get("first_real_answer_audio_ms"), (int, float))
+        or row["first_real_answer_audio_ms"] > silent_after_ms
     ]
     annotated = [row for row in completed if isinstance(row.get("reference_turn_end_ms"), (int, float))]
     premature = [
         row for row in annotated
-        if isinstance(row.get("first_answer_audio_at_ms"), (int, float))
-        and row["first_answer_audio_at_ms"] < row["reference_turn_end_ms"]
+        if isinstance(row.get("first_real_answer_audio_at_ms"), (int, float))
+        and row["first_real_answer_audio_at_ms"] < row["reference_turn_end_ms"]
     ]
     barge_attempts = [row for row in completed if isinstance(row.get("barge_in_detected_at_ms"), (int, float))]
     barge_stop_latencies = [
@@ -144,12 +144,13 @@ def summarize_turns(records: Iterable[dict[str, Any]], silent_after_ms: int = 25
     return {
         "definition": {
             "measurement_schema_version": CURRENT_SCHEMA_VERSION,
-            "first_answer_audio": "first answer media frame handed to VoiceLink after commit; excludes latency cues and cannot prove handset playback",
+            "first_answer_audio": "earliest response media handed to VoiceLink after commit; includes a latency cue when one is emitted",
+            "first_real_answer_audio": "first spoken-answer media frame handed to VoiceLink; excludes latency cues and cannot prove handset playback",
             "first_cue_audio": "first latency-cue frame handed to VoiceLink; never counted as an answer",
             "provider_ttft": "provider-reported request-to-first-token latency",
             "answer_decode_ttft": "request-to-first decoded answer character, including any structured-output prefix",
             "turn_queue_delay": "time from committed transcript to its turn beginning processing",
-            "silent_turn": f"no first answer frame within {silent_after_ms} ms after a committed user turn",
+            "silent_turn": f"no first real answer frame within {silent_after_ms} ms after a committed user turn",
             "premature_turn": "requires an independently labelled reference_turn_end_ms; not inferred from VAD alone",
             "barge_in_stop": "time from detected caller speech while agent output is active to the pipeline's clear/stop hand-off",
             "estimated_tokens": "character-count estimate; provider token counts are exposed separately when available",
@@ -179,11 +180,12 @@ def summarize_turns(records: Iterable[dict[str, Any]], silent_after_ms: int = 25
             "text_to_first_fragment_ms", "tts_connect_ms", "tts_ttfa_ms",
         )},
         "telephony": {name: distribution(name) for name in (
-            "first_cue_audio_ms", "first_answer_audio_ms", "first_frame_send_ms",
+            "first_cue_audio_ms", "first_answer_audio_ms", "first_real_answer_audio_ms", "first_frame_send_ms",
             "outbound_frame_gap_p50_ms", "outbound_frame_gap_p95_ms", "outbound_frame_gap_max_ms",
             "outbound_audio_duration_ms",
         )},
         "first_answer_audio_proxy": distribution("first_answer_audio_ms"),
+        "first_real_answer_audio_proxy": distribution("first_real_answer_audio_ms"),
         "provider_ttft": distribution("provider_ttft_ms"),
         "turn_queue_delay": distribution("turn_queue_delay_ms"),
         "silent_turn_rate": round(len(silent) / len(completed), 4) if completed else None,

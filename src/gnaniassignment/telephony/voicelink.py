@@ -249,17 +249,22 @@ class VoiceLinkCall:
         if self.active_turn_evaluation is None:
             return
         now = self.elapsed_ms()
+        response_latency = round(now - self.active_turn_evaluation["turn_committed_at_ms"], 1)
+        # Compatibility/SLO layer: the earliest response audio can be either
+        # a latency cue or the actual answer. Keep the real answer separately.
+        if "first_answer_audio_at_ms" not in self.active_turn_evaluation:
+            self.active_turn_evaluation["first_answer_audio_at_ms"] = now
+            self.active_turn_evaluation["first_answer_audio_ms"] = response_latency
         if reply_kind == "latency_cue":
             if "first_cue_audio_at_ms" not in self.active_turn_evaluation:
                 self.active_turn_evaluation["first_cue_audio_at_ms"] = now
-                self.active_turn_evaluation["first_cue_audio_ms"] = round(now - self.active_turn_evaluation["turn_committed_at_ms"], 1)
+                self.active_turn_evaluation["first_cue_audio_ms"] = response_latency
             return
-        if "first_answer_audio_at_ms" in self.active_turn_evaluation:
+        if "first_real_answer_audio_at_ms" in self.active_turn_evaluation:
             return
-        self.active_turn_evaluation["first_answer_audio_at_ms"] = now
-        latency = round(now - self.active_turn_evaluation["turn_committed_at_ms"], 1)
-        self.active_turn_evaluation["first_answer_audio_ms"] = latency
-        self.active_turn_evaluation["first_frame_send_ms"] = latency
+        self.active_turn_evaluation["first_real_answer_audio_at_ms"] = now
+        self.active_turn_evaluation["first_real_answer_audio_ms"] = response_latency
+        self.active_turn_evaluation["first_frame_send_ms"] = response_latency
 
     def note_barge_in(self) -> bool:
         if self.active_turn_evaluation is None or "barge_in_detected_at_ms" in self.active_turn_evaluation:
@@ -306,13 +311,13 @@ class VoiceLinkCall:
             turn["outbound_frame_gap_p95_ms"] = percentile(self.answer_frame_gaps_ms, 95)
             turn["outbound_frame_gap_max_ms"] = round(max(self.answer_frame_gaps_ms), 1)
         turn["outbound_audio_duration_ms"] = self.answer_frames_sent * MEDIA_FRAME_MS
-        latency = turn.get("first_answer_audio_ms")
+        latency = turn.get("first_real_answer_audio_ms")
         turn["silent_turn"] = not isinstance(latency, (int, float)) or latency > silent_after_ms
         turn.setdefault("interrupted_turn", outcome == "interrupted")
         turn.setdefault("partial_delivery", outcome == "interrupted" and self.answer_frames_sent > 0)
         if self.latency_store is not None:
             await asyncio.to_thread(self.latency_store.record_turn, self.stream_sid, self.call_sid, self.customer_id, self.turn_index, dict(turn))
-        await self.trace("eval.turn_completed", turn_index=self.turn_index, silent_turn=turn["silent_turn"], outcome=outcome, first_answer_audio_ms=latency)
+        await self.trace("eval.turn_completed", turn_index=self.turn_index, silent_turn=turn["silent_turn"], outcome=outcome, first_real_answer_audio_ms=latency)
         self.active_turn_evaluation = None
 
     async def metric(self, **values: Any) -> None:

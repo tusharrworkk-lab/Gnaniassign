@@ -10,12 +10,13 @@ from gnaniassignment.telephony.voicelink import VoiceLinkCall
 class VoiceEvaluationTests(unittest.TestCase):
     def test_turn_summary_reports_proxy_latency_and_silence(self) -> None:
         report = summarize_turns([
-            {"metrics": {"evaluation_schema_version": 3, "evaluation_finalized": True, "first_answer_audio_ms": 300, "first_answer_audio_at_ms": 1300, "reference_turn_end_ms": 1000, "provider_ttft_ms": 180, "answer_decode_ttft_ms": 210, "turn_queue_delay_ms": 70, "tts_zero_audio_retry_count": 1, "repeated_greeting": False}},
-            {"metrics": {"evaluation_schema_version": 3, "evaluation_finalized": True, "first_answer_audio_ms": 2800, "provider_ttft_ms": 400, "turn_queue_delay_ms": 1000, "repeated_greeting": True}},
+            {"metrics": {"evaluation_schema_version": 3, "evaluation_finalized": True, "first_answer_audio_ms": 300, "first_real_answer_audio_ms": 300, "first_real_answer_audio_at_ms": 1300, "reference_turn_end_ms": 1000, "provider_ttft_ms": 180, "answer_decode_ttft_ms": 210, "turn_queue_delay_ms": 70, "tts_zero_audio_retry_count": 1, "repeated_greeting": False}},
+            {"metrics": {"evaluation_schema_version": 3, "evaluation_finalized": True, "first_answer_audio_ms": 600, "first_real_answer_audio_ms": 2800, "provider_ttft_ms": 400, "turn_queue_delay_ms": 1000, "repeated_greeting": True}},
             {"metrics": {"evaluation_schema_version": 3, "evaluation_finalized": True}},
             {"metrics": {"evaluation_finalized": True, "llm_ttft_latency_ms": 99999}},
         ], silent_after_ms=2500)
-        self.assertEqual(report["first_answer_audio_proxy"], {"count": 2, "p50_ms": 300.0, "p95_ms": 2800.0, "p99_ms": 2800.0})
+        self.assertEqual(report["first_answer_audio_proxy"], {"count": 2, "p50_ms": 300.0, "p95_ms": 600.0, "p99_ms": 600.0})
+        self.assertEqual(report["first_real_answer_audio_proxy"], {"count": 2, "p50_ms": 300.0, "p95_ms": 2800.0, "p99_ms": 2800.0})
         self.assertEqual(report["provider_ttft"], {"count": 2, "p50_ms": 180.0, "p95_ms": 400.0, "p99_ms": 400.0})
         self.assertEqual(report["llm"]["answer_decode_ttft_ms"]["count"], 1)
         self.assertEqual(report["turn_queue_delay"], {"count": 2, "p50_ms": 70.0, "p95_ms": 1000.0, "p99_ms": 1000.0})
@@ -91,6 +92,7 @@ class VoiceInterruptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metrics["orchestration_to_first_answer_text_ms"], 300.0)
         self.assertEqual(metrics["e2e_first_answer_text_ms"], 700.0)
         self.assertEqual(metrics["first_answer_audio_ms"], 800.0)
+        self.assertEqual(metrics["first_real_answer_audio_ms"], 800.0)
 
     async def test_latency_cue_does_not_count_as_answer_audio(self) -> None:
         call = VoiceLinkCall(
@@ -105,4 +107,5 @@ class VoiceInterruptionTests(unittest.IsolatedAsyncioTestCase):
         call.elapsed_ms = lambda: 500.0  # type: ignore[method-assign]
         call.note_first_outbound_audio("latency_cue")
         self.assertEqual(call.active_turn_evaluation["first_cue_audio_ms"], 400.0)
-        self.assertNotIn("first_answer_audio_ms", call.active_turn_evaluation)
+        self.assertEqual(call.active_turn_evaluation["first_answer_audio_ms"], 400.0)
+        self.assertNotIn("first_real_answer_audio_ms", call.active_turn_evaluation)
