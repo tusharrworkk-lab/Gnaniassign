@@ -12,6 +12,7 @@ from langgraph.graph import END, START, StateGraph
 from gnaniassignment.domain.ports import IntentRouter
 from gnaniassignment.llm.agents import AgentResponse, SubAgent
 from gnaniassignment.llm.memory import ChatTurn, render_memory, topic_from_query
+from gnaniassignment.orchestration.call_facts import render_call_facts
 from gnaniassignment.orchestration.working_memory import render_working_memory, update_working_memory
 from gnaniassignment.llm.prompts.intents import INTENT_KEYS, QUESTIONS
 
@@ -28,10 +29,11 @@ class TurnState(TypedDict):
     prior_call_context: list[ChatTurn]
     current_call_history: list[ChatTurn]
     call_memo: str
+    call_facts: dict[str, dict[str, Any]]
     working_memory: dict[str, str]
     account_context: str
     memory: str
-    replies: list[dict[str, str]]
+    replies: list[dict[str, Any]]
     spoken: str | None
     metrics: dict[str, float]
 
@@ -102,7 +104,7 @@ def build_graph(
             "intent": intent,
             "topic": topic,
             "working_memory": working_memory,
-            "memory": render_working_memory(working_memory) + "\n\n" + state["account_context"] + "\n\n" + call_status + "\n\n" + recall_availability + "\n\nCall working memo (concise state of this open call):\n" + state["call_memo"] + "\n\nCurrent call context:\n" + render_memory(active_memory) + "\n\nRelevant prior-call context:\n" + render_memory(prior_memory),
+            "memory": render_working_memory(working_memory) + "\n\n" + render_call_facts(state["call_facts"]) + "\n\n" + state["account_context"] + "\n\n" + call_status + "\n\n" + recall_availability + "\n\nCall working memo (concise state of this open call):\n" + state["call_memo"] + "\n\nCurrent call context:\n" + render_memory(active_memory) + "\n\nRelevant prior-call context:\n" + render_memory(prior_memory),
             "metrics": {"intent_ms": (time.perf_counter() - started) * 1000},
         }
 
@@ -128,7 +130,12 @@ def build_graph(
         else:
             output = clarification_agent.run_stream(state["text"], slots, state["memory"], on_chunk)
         if isinstance(output, AgentResponse):
-            reply = {"agent": clarification_agent.name, "text": output.answer, "summary": output.memory_summary}
+            reply = {
+                "agent": clarification_agent.name,
+                "text": output.answer,
+                "summary": output.memory_summary,
+                "memory_operations": list(output.memory_operations),
+            }
         else:
             reply = {"agent": clarification_agent.name, "text": output, "summary": f"User asked: {state['text']}. Clarification: {output[:280]}"}
         return {"replies": [reply], "metrics": _agent_metrics(state["metrics"], clarification_agent, started)}
@@ -163,7 +170,12 @@ def _agent_node(agent: SubAgent):
         else:
             output = agent.run_stream(state["text"], slots, state["memory"], on_chunk)
         if isinstance(output, AgentResponse):
-            reply = {"agent": agent.name, "text": output.answer, "summary": output.memory_summary}
+            reply = {
+                "agent": agent.name,
+                "text": output.answer,
+                "summary": output.memory_summary,
+                "memory_operations": list(output.memory_operations),
+            }
         else:
             reply = {"agent": agent.name, "text": output, "summary": f"User asked: {state['text']}. Answer: {output[:280]}"}
         return {"replies": [reply], "metrics": _agent_metrics(state["metrics"], agent, started)}

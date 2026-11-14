@@ -347,6 +347,24 @@ To compare Vercel's automatic provider choice with fixed Bedrock and Novita rout
 
 Conversation history is in memory per `TurnSession` and is capped at 100 turns. There is no persistent cross-session memory or concrete vector database adapter yet. The `IntentScopedRetriever` interface accepts one store per intent and can be backed by collections or namespaces in a vector database.
 
+### Active-call hybrid memory
+
+An open call carries three bounded context layers: a rolling semantic memo, the
+latest assistant exchange actually handed off as audio, and validated
+structured facts. Exact dates, times, phone numbers, order IDs and work-item
+IDs are extracted locally before generation. The response model may propose
+additional `set`, `replace` or `clear` operations, but each proposal must cite
+an exact quote from the current caller transcript and pass the field, type and
+overwrite rules in `orchestration/call_facts.py`. The reducer—not the model—
+mutates authoritative fact state. No second LLM request is made, and the
+streamed `answer` remains the first JSON field so TTS can begin before summary
+and memory metadata finish.
+
+Facts and their accepted/rejected operation audit are stored with the completed
+call transcript. Generated assistant text enters immediate conversational
+context only after the voice adapter reports what audio was actually handed
+off; caller facts remain valid even when an assistant reply is interrupted.
+
 ## Test
 
 ```bash
