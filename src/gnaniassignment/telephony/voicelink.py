@@ -63,6 +63,13 @@ def _take_tts_fragment(text: str, minimum_characters: int) -> tuple[str, str] | 
     for index, character in enumerate(stripped):
         if character in ".!?" and (index + 1 == len(stripped) or stripped[index + 1].isspace()):
             return stripped[: index + 1].strip(), stripped[index + 1 :].lstrip()
+        if minimum_characters <= 1 and character in ",;:" and (
+            index + 1 == len(stripped) or stripped[index + 1].isspace()
+        ):
+            # With immediate first-fragment mode, punctuation also proves the
+            # preceding word is complete. It is safe to start TTS without
+            # waiting for the next token or a longer sentence.
+            return stripped[: index + 1].strip(), stripped[index + 1 :].lstrip()
     if len(stripped) < minimum_characters:
         return None
     boundary = stripped.find(" ", minimum_characters)
@@ -688,8 +695,8 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
         pending = ""
         fragment_index = 0
         first_fragment_characters = max(
-            24,
-            min(int(os.getenv("VOICE_LINK_TTS_FIRST_FRAGMENT_CHARS", "42")), 160),
+            1,
+            min(int(os.getenv("VOICE_LINK_TTS_FIRST_FRAGMENT_CHARS", "1")), 160),
         )
         later_fragment_characters = max(
             first_fragment_characters,
@@ -719,9 +726,10 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
                     except asyncio.CancelledError:
                         pass
                 pending += chunk
-                # The first spoken phrase has a smaller threshold than later
-                # phrases. Waiting for an entire sentence/90 characters hid
-                # the model's fast TTFT behind another ~1 second of streaming.
+                # The first spoken fragment starts at the first safe word or
+                # sentence boundary. Never send an incomplete word to TTS,
+                # but do not impose an arbitrary character delay on the
+                # model's first streamed answer token.
                 minimum = first_fragment_characters if fragment_index == 0 else later_fragment_characters
                 ready = _take_tts_fragment(pending, minimum)
                 if ready is not None:
