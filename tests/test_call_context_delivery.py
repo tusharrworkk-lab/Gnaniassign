@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 import unittest
@@ -27,6 +28,17 @@ class Chat:
     def complete(self, _system: str, user: str) -> str:
         self.prompts.append(user)
         return "Theek hai, main note kar leti hoon."
+
+
+class SemanticChat:
+    def __init__(self, summaries: list[str]) -> None:
+        self.summaries = summaries
+        self.prompts: list[str] = []
+
+    def complete(self, _system: str, user: str) -> str:
+        self.prompts.append(user)
+        summary = self.summaries[len(self.prompts) - 1]
+        return json.dumps({"answer": "Theek hai, main note kar leti hoon.", "memory_summary": summary})
 
 
 class CallContextDeliveryTests(unittest.TestCase):
@@ -182,6 +194,47 @@ class CallContextDeliveryTests(unittest.TestCase):
         self.assertTrue(session.mark_delivery("audio_sent"))
         session.ask("Theek hai")
         self.assertIn("Answer: Theek hai, main note kar leti hoon", chat.prompts[-1])
+
+    def test_call_memo_is_one_rolling_semantic_state(self):
+        chat = SemanticChat([
+            "Caller wants Tushar informed about a party; time is pending.",
+            "Caller wants Tushar informed about tomorrow's 6 PM party; callback is not requested.",
+            "Caller corrected the party time to 7 PM tomorrow; callback is not requested.",
+            "Caller confirmed the final request is tomorrow's 7 PM party notice; nothing remains pending.",
+        ])
+        session = TurnSession(build_graph(GenericRouter(), generic_agents(chat)))
+        session.ask("Tushar ko party ke baare mein batana")
+        session.ask("Kal chhah baje")
+        session.ask("Nahi, saat baje")
+        session.ask("Haan, bas itna hi")
+
+        self.assertEqual(session.call_memo, chat.summaries[-1])
+        self.assertIn(chat.summaries[1], chat.prompts[2])
+        self.assertNotIn(chat.summaries[0], chat.prompts[2])
+        self.assertLessEqual(len(session.call_memo), 320)
+
+    def test_final_call_summary_uses_latest_semantic_memo_only(self):
+        class Memory:
+            def __init__(self): self.saved = []
+            def load_call_summaries(self, *_args): return []
+            def append(self, *_args): pass
+            def append_call_summary(self, _customer_id, _session_id, summary, *_args):
+                self.saved.append(summary)
+
+        memory = Memory()
+        chat = SemanticChat([
+            "Caller requests a callback; timing is pending.",
+            "Caller requests a callback tomorrow after 4 PM; no other action is pending.",
+        ])
+        session = TurnSession(
+            build_graph(GenericRouter(), generic_agents(chat)),
+            memory_store=memory, customer_id="caller-1",
+        )
+        session.ask("Tushar se callback chahiye")
+        session.ask("Kal chaar baje ke baad")
+        session.finalize_call()
+
+        self.assertEqual(memory.saved, ["Previous call: " + chat.summaries[-1]])
 
     def test_next_call_summary_excludes_unheard_answer(self):
         class Memory:

@@ -15,6 +15,7 @@ from gnaniassignment.conversation_analytics import AcilConversationTracer, Conve
 MAX_HISTORY_TURNS = 100
 MAX_PRIOR_CALL_SUMMARIES = 3
 MAX_CALL_SUMMARY_CHARS = 900
+MAX_CALL_MEMO_CHARS = 320
 logger = logging.getLogger(__name__)
 
 
@@ -47,6 +48,7 @@ class TurnSession:
         self.call_context_turns: list[ChatTurn] = []
         self.delivery_statuses: list[str] = []
         self.handed_off_answers: list[str] = []
+        self.call_memo = ""
         self._deferred_records: dict[int, ConversationRecord | None] = {}
         self.stt_segments: list[dict[str, object]] = []
         self.account_context_provider = account_context_provider
@@ -76,7 +78,7 @@ class TurnSession:
             if self.account_context_provider is not None:
                 self.account_context = self.account_context_provider(text, self.working_memory)
             config = {"configurable": {"on_answer_chunk": on_chunk}} if on_chunk is not None else None
-            result = self.graph.invoke({"session_id": self.session_id, "text": text, "answers": {}, "intent": "", "topic": "", "history": self.history, "prior_call_context": self.prior_call_context, "current_call_history": self.call_context_turns, "working_memory": self.working_memory, "account_context": self.account_context, "memory": "", "replies": [], "spoken": None, "metrics": {}}, config=config)
+            result = self.graph.invoke({"session_id": self.session_id, "text": text, "answers": {}, "intent": "", "topic": "", "history": self.history, "prior_call_context": self.prior_call_context, "current_call_history": self.call_context_turns, "call_memo": self.call_memo or "No call memo yet.", "working_memory": self.working_memory, "account_context": self.account_context, "memory": "", "replies": [], "spoken": None, "metrics": {}}, config=config)
         except Exception:
             if not defer_delivery:
                 self.phrases = [text]
@@ -149,6 +151,7 @@ class TurnSession:
             ))
         else:
             self.record_unanswered_request(turn.query, status=status, intent=turn.intent, topic=turn.topic)
+        self._update_call_memo(turn, status)
         if pending in self._deferred_records:
             record = self._deferred_records.pop(pending)
             try:
@@ -158,6 +161,18 @@ class TurnSession:
                 # disappear from this call's in-memory conversation context.
                 logger.exception("Could not persist voice turn for session %s", self.session_id)
         return True
+
+    def _update_call_memo(self, turn: ChatTurn, status: str) -> None:
+        """Replace the rolling semantic state using the current model response."""
+        memo = " ".join(turn.summary.split())
+        if not memo:
+            memo = f"Caller wants: {' '.join(turn.query.split())[:240]}"
+        if status in {"failed", "interrupted"}:
+            # Plain-text fallback summaries contain the generated answer. It
+            # must not enter memory when that answer was not fully delivered.
+            memo = memo.partition(". Answer:")[0]
+            memo += " Assistant reply delivery was incomplete."
+        self.call_memo = memo[:MAX_CALL_MEMO_CHARS]
 
     def record_unanswered_request(self, text: str, *, status: str = "failed", intent: str = "generic", topic: str = "general") -> None:
         """Keep the caller's request while avoiding an unheard assistant reply."""
@@ -198,25 +213,17 @@ class TurnSession:
     def _persist_call_summary(self) -> None:
         """Store a small deterministic hand-off summary for the next call.
 
-        No extra model call is made after the phone call; per-turn summaries
-        already produced by the agent are compacted so finalization cannot add
-        voice latency or background LLM cost.
+        No extra model call is made after the phone call. The latest rolling
+        memo already represents the complete call state.
         """
         if self.memory_store is None or self.customer_id is None:
             return
         append_summary = getattr(self.memory_store, "append_call_summary", None)
         if append_summary is None:
             return
-        lines: list[str] = []
-        seen: set[str] = set()
-        for turn in self.call_context_turns[-3:]:
-            item = turn.summary.strip()
-            if item and item not in seen:
-                lines.append(item)
-                seen.add(item)
-        if not lines:
+        if not self.call_memo or not self.call_context_turns:
             return
-        summary = "Previous call: " + " ".join(lines)
+        summary = "Previous call: " + self.call_memo
         append_summary(
             self.customer_id,
             self.session_id,
