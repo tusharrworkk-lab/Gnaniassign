@@ -433,6 +433,9 @@ class BedrockGptOssChatModel:
         self.auth_mode = os.getenv("BEDROCK_AUTH_MODE", "api_key").lower()
         self.last_first_token_ms: float | None = None
         self.last_stream_ms: float | None = None
+        self.last_request_setup_ms: float | None = None
+        self.last_input_tokens: int | None = None
+        self.last_output_tokens: int | None = None
         if client is not None:
             self.client = client
             return
@@ -486,11 +489,25 @@ class BedrockGptOssChatModel:
         started = time.perf_counter()
         self.last_first_token_ms = None
         self.last_stream_ms = None
+        self.last_request_setup_ms = None
+        self.last_input_tokens = None
+        self.last_output_tokens = None
         emitted_text = False
         stop_reason = "unknown"
         try:
             response = self.client.converse_stream(**self._request(system, user))
+            self.last_request_setup_ms = (time.perf_counter() - started) * 1000
             for event in response["stream"]:
+                metadata = event.get("metadata")
+                if isinstance(metadata, dict):
+                    usage = metadata.get("usage")
+                    if isinstance(usage, dict):
+                        input_tokens = usage.get("inputTokens")
+                        output_tokens = usage.get("outputTokens")
+                        if isinstance(input_tokens, int):
+                            self.last_input_tokens = input_tokens
+                        if isinstance(output_tokens, int):
+                            self.last_output_tokens = output_tokens
                 message_stop = event.get("messageStop")
                 if isinstance(message_stop, dict):
                     stop_reason = str(message_stop.get("stopReason", stop_reason))

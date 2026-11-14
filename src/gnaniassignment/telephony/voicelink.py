@@ -28,11 +28,12 @@ from gnaniassignment.tts.gnani import GnaniRealtimeTts, GnaniTtsError
 from gnaniassignment.voice.events import VoiceError, VoiceTranscript
 from gnaniassignment.voice.audio_enhancement import AudioEnhancer, create_audio_enhancer
 from gnaniassignment.telephony.latency import CallLatencyStore
+from gnaniassignment.telephony.evaluation import conversation_quality_flags, percentile
 
 
 PCM_WIDTH = 2
 MEDIA_FRAME_MS = 20
-VOICE_EVALUATION_SCHEMA_VERSION = 2
+VOICE_EVALUATION_SCHEMA_VERSION = 3
 logger = logging.getLogger(__name__)
 
 
@@ -182,7 +183,12 @@ class VoiceLinkCall:
     last_speech_started_ms: float | None = None
     last_speech_ended_ms: float | None = None
     last_turn_committed_ms: float | None = None
+    last_turn_commit_reason: str | None = None
     active_turn_evaluation: dict[str, Any] | None = field(default=None, repr=False)
+    answer_frame_gaps_ms: list[float] = field(default_factory=list, repr=False)
+    answer_frames_sent: int = 0
+    answer_last_frame_at: float | None = field(default=None, repr=False)
+    last_agent_response_text: str = field(default="", repr=False)
     reply_interrupted: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     barge_in_active: bool = False
 
@@ -212,31 +218,53 @@ class VoiceLinkCall:
             "response_latency_anchor": "turn_committed",
             "turn_processing_started_at_ms": started,
             "turn_queue_delay_ms": round(started - committed, 1),
+            "turn_commit_reason": self.last_turn_commit_reason,
         }
+        speech_start = self.last_speech_started_ms
+        if (
+            isinstance(speech_end, (int, float))
+            and (not isinstance(speech_start, (int, float)) or speech_end >= speech_start)
+        ):
+            wait = round(max(0.0, committed - speech_end), 1)
+            self.active_turn_evaluation["speech_end_to_commit_ms"] = wait
+            if self.last_turn_commit_reason == "provider_final":
+                self.active_turn_evaluation["provider_final_wait_ms"] = wait
+            elif self.last_turn_commit_reason == "smart_turn":
+                self.active_turn_evaluation["vad_semantic_wait_ms"] = wait
+        self.answer_frame_gaps_ms.clear()
+        self.answer_frames_sent = 0
+        self.answer_last_frame_at = None
 
     def note_llm_first_token(self) -> None:
-        if self.active_turn_evaluation is None or "llm_model_ttft_ms" in self.active_turn_evaluation:
+        if self.active_turn_evaluation is None or "first_answer_text_at_ms" in self.active_turn_evaluation:
             return
         now = self.elapsed_ms()
-        self.active_turn_evaluation["llm_first_token_at_ms"] = now
+        self.active_turn_evaluation["first_answer_text_at_ms"] = now
         processing_started = self.active_turn_evaluation["turn_processing_started_at_ms"]
         committed = self.active_turn_evaluation["turn_committed_at_ms"]
-        # Model TTFT intentionally excludes endpointing and serial turn
-        # queueing.  Keep E2E separately so an overloaded pipeline is visible
-        # without misrepresenting model performance.
-        self.active_turn_evaluation["llm_model_ttft_ms"] = round(now - processing_started, 1)
-        self.active_turn_evaluation["e2e_llm_ttft_ms"] = round(now - committed, 1)
+        self.active_turn_evaluation["orchestration_to_first_answer_text_ms"] = round(now - processing_started, 1)
+        self.active_turn_evaluation["e2e_first_answer_text_ms"] = round(now - committed, 1)
 
-    def note_first_outbound_audio(self) -> None:
-        if self.active_turn_evaluation is None or "first_outbound_audio_at_ms" in self.active_turn_evaluation:
+    def note_first_outbound_audio(self, reply_kind: str) -> None:
+        if self.active_turn_evaluation is None:
             return
         now = self.elapsed_ms()
-        self.active_turn_evaluation["first_outbound_audio_at_ms"] = now
-        self.active_turn_evaluation["first_outbound_audio_latency_ms"] = round(now - self.active_turn_evaluation["response_latency_anchor_at_ms"], 1)
-        self.active_turn_evaluation["post_commit_first_outbound_audio_latency_ms"] = round(now - self.active_turn_evaluation["turn_committed_at_ms"], 1)
-        self.active_turn_evaluation["processing_to_first_outbound_audio_latency_ms"] = round(
-            now - self.active_turn_evaluation["turn_processing_started_at_ms"], 1
-        )
+        response_latency = round(now - self.active_turn_evaluation["turn_committed_at_ms"], 1)
+        # Compatibility/SLO layer: the earliest response audio can be either
+        # a latency cue or the actual answer. Keep the real answer separately.
+        if "first_answer_audio_at_ms" not in self.active_turn_evaluation:
+            self.active_turn_evaluation["first_answer_audio_at_ms"] = now
+            self.active_turn_evaluation["first_answer_audio_ms"] = response_latency
+        if reply_kind == "latency_cue":
+            if "first_cue_audio_at_ms" not in self.active_turn_evaluation:
+                self.active_turn_evaluation["first_cue_audio_at_ms"] = now
+                self.active_turn_evaluation["first_cue_audio_ms"] = response_latency
+            return
+        if "first_real_answer_audio_at_ms" in self.active_turn_evaluation:
+            return
+        self.active_turn_evaluation["first_real_answer_audio_at_ms"] = now
+        self.active_turn_evaluation["first_real_answer_audio_ms"] = response_latency
+        self.active_turn_evaluation["first_frame_send_ms"] = response_latency
 
     def note_barge_in(self) -> bool:
         if self.active_turn_evaluation is None or "barge_in_detected_at_ms" in self.active_turn_evaluation:
@@ -278,11 +306,18 @@ class VoiceLinkCall:
         turn["outcome"] = outcome
         turn["finished_at_ms"] = self.elapsed_ms()
         silent_after_ms = max(100, int(os.getenv("VOICE_EVAL_SILENT_TURN_TIMEOUT_MS", "2500")))
-        latency = turn.get("first_outbound_audio_latency_ms")
+        if self.answer_frame_gaps_ms:
+            turn["outbound_frame_gap_p50_ms"] = percentile(self.answer_frame_gaps_ms, 50)
+            turn["outbound_frame_gap_p95_ms"] = percentile(self.answer_frame_gaps_ms, 95)
+            turn["outbound_frame_gap_max_ms"] = round(max(self.answer_frame_gaps_ms), 1)
+        turn["outbound_audio_duration_ms"] = self.answer_frames_sent * MEDIA_FRAME_MS
+        latency = turn.get("first_real_answer_audio_ms")
         turn["silent_turn"] = not isinstance(latency, (int, float)) or latency > silent_after_ms
+        turn.setdefault("interrupted_turn", outcome == "interrupted")
+        turn.setdefault("partial_delivery", outcome == "interrupted" and self.answer_frames_sent > 0)
         if self.latency_store is not None:
             await asyncio.to_thread(self.latency_store.record_turn, self.stream_sid, self.call_sid, self.customer_id, self.turn_index, dict(turn))
-        await self.trace("eval.turn_completed", turn_index=self.turn_index, silent_turn=turn["silent_turn"], outcome=outcome, first_outbound_audio_latency_ms=latency)
+        await self.trace("eval.turn_completed", turn_index=self.turn_index, silent_turn=turn["silent_turn"], outcome=outcome, first_real_answer_audio_ms=latency)
         self.active_turn_evaluation = None
 
     async def metric(self, **values: Any) -> None:
@@ -361,6 +396,7 @@ class VoiceLinkCall:
         # media/mark events do not acknowledge handset playback.
         if self._active_reply_metrics is not None:
             now_ms = self.elapsed_ms()
+            reply_kind = str(self._active_reply_metrics.get("reply_kind", "answer"))
             if self.outbound_last_frame_at is not None:
                 gap_ms = round((sent_at - self.outbound_last_frame_at) * 1000, 1)
                 self._active_reply_metrics["outbound_max_frame_gap_ms"] = max(
@@ -371,7 +407,7 @@ class VoiceLinkCall:
             self._active_reply_metrics["outbound_last_frame_sent_ms"] = now_ms
             self._active_reply_metrics.setdefault("outbound_first_frame_sent_ms", now_ms)
             if self._active_reply_metrics["outbound_frames_sent"] == 1:
-                self.note_first_outbound_audio()
+                self.note_first_outbound_audio(reply_kind)
                 await self.trace(
                     "tts.outbound_first_frame",
                     reply_index=self.reply_count,
@@ -380,6 +416,11 @@ class VoiceLinkCall:
                     reply_kind=self._active_reply_metrics.get("reply_kind"),
                     elapsed_ms=now_ms,
                 )
+            if reply_kind == "answer":
+                if self.answer_last_frame_at is not None:
+                    self.answer_frame_gaps_ms.append(round((sent_at - self.answer_last_frame_at) * 1000, 1))
+                self.answer_last_frame_at = sent_at
+                self.answer_frames_sent += 1
 
     async def flush_outbound(self) -> None:
         if self.outbound_buffer and not self.reply_interrupted.is_set():
@@ -493,6 +534,7 @@ class VoiceLinkCall:
             return False
         self.last_committed_transcript = signature
         self.last_turn_committed_ms = self.elapsed_ms()
+        self.last_turn_commit_reason = reason
         await self.turn_queue.put(transcript)
         await self.metric(stt_turn_committed_by=reason)
         await self.trace("transcript.committed", text=transcript.text, final=transcript.is_final, reason=reason)
@@ -533,6 +575,8 @@ class VoiceLinkCall:
             "turn_index": turn_index,
             "fragment_index": fragment_index,
             "reply_kind": reply_kind,
+            "tts_zero_audio_retry_count": 0,
+            "tts_reconnect_count": 0,
         }
         try:
             await self.trace(
@@ -546,6 +590,8 @@ class VoiceLinkCall:
                 audio_chunks = 0
                 request_started = self.elapsed_ms()
                 self._active_reply_metrics["tts_request_started_ms"] = request_started
+                if reply_kind == "answer" and self.active_turn_evaluation is not None:
+                    self.active_turn_evaluation.setdefault("tts_request_started_at_ms", request_started)
                 await self.trace(
                     "tts.requested", reply_index=self.reply_count, turn_index=turn_index,
                     fragment_index=fragment_index, reply_kind=reply_kind,
@@ -564,6 +610,8 @@ class VoiceLinkCall:
                         if not self._active_reply_metrics.get("tts_first_audio_emitted"):
                             self._active_reply_metrics["tts_first_audio_emitted"] = True
                             self._active_reply_metrics["tts_first_pcm_bytes"] = len(chunk.audio)
+                            if reply_kind == "answer" and self.active_turn_evaluation is not None:
+                                self.active_turn_evaluation.setdefault("tts_ttfa_ms", round(self.tts.last_first_audio_ms, 1))
                             await self.trace(
                                 "tts.first_audio", reply_index=self.reply_count,
                                 turn_index=turn_index, fragment_index=fragment_index,
@@ -579,8 +627,15 @@ class VoiceLinkCall:
                     # successful spoken reply. Reopen and retry once: no
                     # caller audio has been sent, so duplication is impossible.
                     await self.trace("tts.zero_audio_retry", reply_index=self.reply_count)
+                    self._active_reply_metrics["tts_zero_audio_retry_count"] += 1
+                    self._active_reply_metrics["tts_reconnect_count"] += 1
+                    reconnect_started = time.perf_counter()
                     await self.tts.__aexit__(None, None, None)
                     await self.tts.__aenter__()
+                    connect_ms = round((time.perf_counter() - reconnect_started) * 1000, 1)
+                    self._active_reply_metrics["tts_connect_ms"] = connect_ms
+                    if reply_kind == "answer" and self.active_turn_evaluation is not None:
+                        self.active_turn_evaluation["tts_connect_ms"] = connect_ms
                     continue
                 raise GnaniTtsError("Gnani TTS completed without producing audio")
             await self.flush_outbound()
@@ -603,6 +658,15 @@ class VoiceLinkCall:
         finally:
             if self._active_reply_metrics is not None:
                 snapshot = dict(self._active_reply_metrics)
+                if reply_kind == "answer" and self.active_turn_evaluation is not None:
+                    self.active_turn_evaluation["tts_zero_audio_retry_count"] = (
+                        int(self.active_turn_evaluation.get("tts_zero_audio_retry_count", 0))
+                        + int(snapshot.get("tts_zero_audio_retry_count", 0))
+                    )
+                    self.active_turn_evaluation["tts_reconnect_count"] = (
+                        int(self.active_turn_evaluation.get("tts_reconnect_count", 0))
+                        + int(snapshot.get("tts_reconnect_count", 0))
+                    )
                 self.reply_handoffs.append(snapshot)
                 del self.reply_handoffs[:-20]
                 await self.metric(
@@ -637,6 +701,7 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
     answer_fragments = 0
     all_answer_audio_sent = True
     handed_off_fragments: list[str] = []
+    failure_stage = "llm"
     call.reply_interrupted.clear()
     call.barge_in_active = False
     await call.begin_turn_evaluation()
@@ -660,7 +725,7 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
             first answer text arrives.  The caller hears the cue at the
             configured delay, then the normal answer is synthesized unchanged.
             """
-            nonlocal clear_throat_started
+            nonlocal clear_throat_started, failure_stage
             if os.getenv("GNANI_TTS_POST_RESPONSE_CLEAR_THROAT_ENABLED", "false").lower() not in {"1", "true", "yes", "on"}:
                 return False
             threshold_ms = max(0.0, float(os.getenv("GNANI_TTS_POST_RESPONSE_CLEAR_THROAT_MS", "600")))
@@ -672,10 +737,12 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
                 "tts.clear_throat", proactive=True, threshold_ms=threshold_ms,
                 turn_index=call.turn_index,
             )
+            failure_stage = "tts"
             await call.speak_reply(
                 "", add_clear_throat=True, turn_index=call.turn_index,
                 reply_kind="latency_cue",
             )
+            failure_stage = "llm"
             return True
 
         def on_chunk(chunk: str) -> None:
@@ -727,14 +794,23 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
                 if ready is not None:
                     fragment_index += 1
                     fragment, pending = ready
+                    turn_metrics = getattr(call, "active_turn_evaluation", None)
+                    if fragment_index == 1 and isinstance(turn_metrics, dict):
+                        fragment_ready_at = call.elapsed_ms()
+                        turn_metrics["first_fragment_ready_at_ms"] = fragment_ready_at
+                        first_text_at = turn_metrics.get("first_answer_text_at_ms")
+                        if isinstance(first_text_at, (int, float)):
+                            turn_metrics["text_to_first_fragment_ms"] = round(fragment_ready_at - first_text_at, 1)
                     await call.trace(
                         "llm.fragment_ready", turn_index=call.turn_index,
                         fragment_index=fragment_index, text_characters=len(fragment),
                     )
+                    failure_stage = "tts"
                     audio_sent = await call.speak_reply(
                         fragment, turn_index=call.turn_index,
                         fragment_index=fragment_index,
                     )
+                    failure_stage = "llm"
                     answer_fragments += 1
                     all_answer_audio_sent = all_answer_audio_sent and audio_sent
                     if audio_sent:
@@ -743,17 +819,31 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
                         outcome = "interrupted"
                         break
             result = await generation
+            turn_metrics = getattr(call, "active_turn_evaluation", None)
+            if isinstance(turn_metrics, dict) and isinstance(result.get("metrics"), dict):
+                # Only numeric timing/count metadata and prompt version reach
+                # the evaluation row. Prompt or transcript contents never do.
+                turn_metrics.update(result["metrics"])
             if pending.strip() and not call.reply_interrupted.is_set():
                 fragment_index += 1
                 fragment = pending.strip()
+                turn_metrics = getattr(call, "active_turn_evaluation", None)
+                if fragment_index == 1 and isinstance(turn_metrics, dict):
+                    fragment_ready_at = call.elapsed_ms()
+                    turn_metrics["first_fragment_ready_at_ms"] = fragment_ready_at
+                    first_text_at = turn_metrics.get("first_answer_text_at_ms")
+                    if isinstance(first_text_at, (int, float)):
+                        turn_metrics["text_to_first_fragment_ms"] = round(fragment_ready_at - first_text_at, 1)
                 await call.trace(
                     "llm.fragment_ready", turn_index=call.turn_index,
                     fragment_index=fragment_index, text_characters=len(fragment),
                 )
+                failure_stage = "tts"
                 audio_sent = await call.speak_reply(
                     fragment, turn_index=call.turn_index,
                     fragment_index=fragment_index,
                 )
+                failure_stage = "llm"
                 answer_fragments += 1
                 all_answer_audio_sent = all_answer_audio_sent and audio_sent
                 if audio_sent:
@@ -775,6 +865,19 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
             await asyncio.to_thread(call.session.mark_delivery, delivery_status)
         if isinstance(getattr(call, "active_turn_evaluation", None), dict):
             call.active_turn_evaluation["delivery_status"] = delivery_status
+            call.active_turn_evaluation["partial_delivery"] = delivery_status == "interrupted" and bool(handed_off_text)
+            flags = conversation_quality_flags(
+                stt_event.text,
+                result["spoken"] or "",
+                turn_index=call.turn_index,
+                previous_response=getattr(call, "last_agent_response_text", ""),
+            )
+            flags["privacy_boundary_non_compliance"] = (
+                flags["privacy_boundary_applicable"] and not flags["privacy_boundary_compliant"]
+            )
+            call.active_turn_evaluation.update(flags)
+        if hasattr(call, "last_agent_response_text"):
+            call.last_agent_response_text = result["spoken"] or ""
         await call.trace("agent.delivery", status=delivery_status, answer_fragments=answer_fragments)
         await call.metric(llm_completed_ms=round((time.perf_counter()-call.started_at)*1000,1))
         await call.trace("llm.completed", intent=result["intent"], response_characters=len(result["spoken"] or ""))
@@ -795,6 +898,9 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
             call.session.record_unanswered_request(stt_event.text)
         if isinstance(getattr(call, "active_turn_evaluation", None), dict):
             call.active_turn_evaluation["delivery_status"] = "failed"
+            call.active_turn_evaluation["llm_failure"] = failure_stage == "llm"
+            call.active_turn_evaluation["tts_failure"] = failure_stage == "tts"
+            call.active_turn_evaluation["json_parse_failure"] = failure_stage == "llm" and isinstance(error, (ValueError, json.JSONDecodeError))
         # A model may exhaust its reasoning/output budget. The caller should
         # hear a retry prompt and the next final STT segment must still work.
         logger.exception("voicelink turn failed: stream=%s", call.stream_sid)

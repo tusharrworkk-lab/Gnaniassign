@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -85,10 +86,12 @@ class TurnSession:
         # is deterministic local work and adds no second model request.
         self.call_facts = extract_deterministic_facts(self.call_facts, text, turn_number)
         try:
+            account_context_started = time.perf_counter()
             if self.account_context_provider is not None:
                 self.account_context = self.account_context_provider(text, self.working_memory)
+            account_context_ms = round((time.perf_counter() - account_context_started) * 1000, 1)
             config = {"configurable": {"on_answer_chunk": on_chunk}} if on_chunk is not None else None
-            result = self.graph.invoke({"session_id": self.session_id, "text": text, "answers": {}, "intent": "", "topic": "", "history": self.history, "prior_call_context": self.prior_call_context, "current_call_history": self.call_context_turns, "call_memo": self.call_memo or "No call memo yet.", "call_facts": self.call_facts, "working_memory": self.working_memory, "account_context": self.account_context, "memory": "", "replies": [], "spoken": None, "metrics": {}}, config=config)
+            result = self.graph.invoke({"session_id": self.session_id, "text": text, "answers": {}, "intent": "", "topic": "", "history": self.history, "prior_call_context": self.prior_call_context, "current_call_history": self.call_context_turns, "call_memo": self.call_memo or "No call memo yet.", "call_facts": self.call_facts, "working_memory": self.working_memory, "account_context": self.account_context, "memory": "", "replies": [], "spoken": None, "metrics": {"account_context_ms": account_context_ms}}, config=config)
         except Exception:
             if not defer_delivery:
                 self.phrases = [text]
