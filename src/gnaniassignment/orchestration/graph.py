@@ -35,7 +35,7 @@ class TurnState(TypedDict):
     memory: str
     replies: list[dict[str, Any]]
     spoken: str | None
-    metrics: dict[str, float]
+    metrics: dict[str, Any]
 
 
 def select_intent(answers: dict[str, Any], threshold: float = THRESHOLD, allowed_intents: tuple[str, ...] = INTENT_KEYS) -> str:
@@ -77,6 +77,7 @@ def build_graph(
             "conversation_session_id": state["session_id"],
         }
         answers = router.predict(decision_context, QUESTIONS)["answers"]
+        router_finished = time.perf_counter()
         intent = select_intent(answers, threshold, tuple(agents))
         topic = topic_from_query(state["text"])
         if topic == "general" and state["current_call_history"] and state["current_call_history"][-1].intent == intent:
@@ -99,13 +100,18 @@ def build_graph(
             if state["prior_call_context"]
             else "Prior-call memory: no completed-call summary is available."
         )
+        context_finished = time.perf_counter()
         return {
             "answers": answers,
             "intent": intent,
             "topic": topic,
             "working_memory": working_memory,
             "memory": render_working_memory(working_memory) + "\n\n" + render_call_facts(state["call_facts"]) + "\n\n" + state["account_context"] + "\n\n" + call_status + "\n\n" + recall_availability + "\n\nCall working memo (concise state of this open call):\n" + state["call_memo"] + "\n\nCurrent call context:\n" + render_memory(active_memory) + "\n\nRelevant prior-call context:\n" + render_memory(prior_memory),
-            "metrics": {"intent_ms": (time.perf_counter() - started) * 1000},
+            "metrics": {
+                **state["metrics"],
+                "router_ms": round((router_finished - started) * 1000, 1),
+                "context_assembly_ms": round((context_finished - router_finished) * 1000, 1),
+            },
         }
 
     def route(state: TurnState) -> str:
@@ -183,13 +189,25 @@ def _agent_node(agent: SubAgent):
     return node
 
 
-def _agent_metrics(existing: dict[str, float], agent: SubAgent, started: float) -> dict[str, float]:
+def _agent_metrics(existing: dict[str, Any], agent: SubAgent, started: float) -> dict[str, Any]:
     """Attach provider timing exposed by streaming models without coupling ports."""
     metrics = {**existing, "agent_ms": (time.perf_counter() - started) * 1000}
     first_token = getattr(getattr(agent, "model", None), "last_first_token_ms", None)
     stream_total = getattr(getattr(agent, "model", None), "last_stream_ms", None)
+    request_setup = getattr(getattr(agent, "model", None), "last_request_setup_ms", None)
+    agent_metrics = getattr(agent, "last_metrics", {})
+    if isinstance(agent_metrics, dict):
+        metrics.update(agent_metrics)
     if isinstance(first_token, (int, float)):
-        metrics["llm_ttft_ms"] = float(first_token)
+        metrics["provider_ttft_ms"] = round(float(first_token), 1)
     if isinstance(stream_total, (int, float)):
-        metrics["llm_stream_ms"] = float(stream_total)
+        metrics["llm_total_stream_ms"] = round(float(stream_total), 1)
+    if isinstance(request_setup, (int, float)):
+        metrics["llm_request_setup_ms"] = round(float(request_setup), 1)
+    provider_input_tokens = getattr(getattr(agent, "model", None), "last_input_tokens", None)
+    provider_output_tokens = getattr(getattr(agent, "model", None), "last_output_tokens", None)
+    if isinstance(provider_input_tokens, int):
+        metrics["input_tokens"] = provider_input_tokens
+    if isinstance(provider_output_tokens, int):
+        metrics["output_tokens"] = provider_output_tokens
     return metrics

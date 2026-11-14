@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import math
 import re
+import time
 from typing import Callable, Mapping
 
 from gnaniassignment.llm.agents.base import AgentResponse, SubAgent
@@ -68,6 +71,7 @@ class EnquiryAgent(SubAgent):
         super().__init__()
         self.name, self.model, self.knowledge, self.retriever = name, model, knowledge, retriever or EmptyRetriever()
         self.system_prompt = prompts[name]
+        self.last_metrics: dict[str, float | int | str] = {}
 
     def reply(self, text: str, slots: dict[str, str], memory: str = "") -> AgentResponse:
         system_prompt, user_prompt = self._prompts(text, memory)
@@ -83,6 +87,7 @@ class EnquiryAgent(SubAgent):
     def run_stream(self, text: str, slots: dict[str, str], memory: str, on_chunk: Callable[[str], None]) -> AgentResponse:
         self.calls += 1
         system_prompt, user_prompt = self._prompts(text, memory)
+        stream_started = time.perf_counter()
         stream_complete = getattr(self.model, "stream_complete", None)
         memory_recall = slots.get("memory_recall_tool") if self.name == "generic" else None
         stream_with_memory_recall = getattr(self.model, "stream_complete_with_memory_recall", None)
@@ -94,6 +99,7 @@ class EnquiryAgent(SubAgent):
         raw_parts: list[str] = []
         structured: bool | None = None
         plain_answer_streamed = False
+        answer_text_started: float | None = None
         invoke = (
             lambda: stream_with_memory_recall(
                 system_prompt,
@@ -120,17 +126,34 @@ class EnquiryAgent(SubAgent):
             if structured:
                 answer_delta = answer_stream.feed(chunk)
                 if answer_delta:
+                    if answer_text_started is None:
+                        answer_text_started = time.perf_counter()
+                        self.last_metrics["answer_decode_ttft_ms"] = round(
+                            (answer_text_started - stream_started) * 1000, 1
+                        )
                     on_chunk(answer_delta)
             else:
+                if answer_text_started is None:
+                    answer_text_started = time.perf_counter()
+                    self.last_metrics["answer_decode_ttft_ms"] = round(
+                        (answer_text_started - stream_started) * 1000, 1
+                    )
                 on_chunk(chunk)
                 plain_answer_streamed = True
         output = self._parse_response("".join(raw_parts), text)
         if not answer_stream.emitted and not plain_answer_streamed:
+            if answer_text_started is None:
+                self.last_metrics["answer_decode_ttft_ms"] = round(
+                    (time.perf_counter() - stream_started) * 1000, 1
+                )
             on_chunk(output.answer)
+        self.last_metrics["output_token_estimate"] = math.ceil(len(output.answer) / 4)
         return output
 
     def _prompts(self, text: str, memory: str) -> tuple[str, str]:
+        retrieval_started = time.perf_counter()
         retrieved = self.retriever.retrieve(self.name, text, limit=4)
+        retrieval_finished = time.perf_counter()
         knowledge_parts = [self.knowledge, *retrieved]
         knowledge = "\n\n".join(part for part in knowledge_parts if part and part != "No approved knowledge has been loaded yet.")
         knowledge = (knowledge or "No approved knowledge has been loaded yet.")[:MAX_KNOWLEDGE_CHARS]
@@ -146,6 +169,15 @@ class EnquiryAgent(SubAgent):
         if verified_order:
             slot_rule += f"\n\nMANDATORY: A verified account record for order ID {verified_order.group(1)} is already selected for this turn. Use its supplied status directly. Do not ask for an order ID."
         user_prompt = f"Approved knowledge:\n{knowledge}\n\nRelevant conversation:\n{memory}\n\nCurrent user query:\n{text}{slot_rule}"
+        prompt_finished = time.perf_counter()
+        total_characters = len(self.system_prompt) + len(user_prompt)
+        self.last_metrics = {
+            "retrieval_ms": round((retrieval_finished - retrieval_started) * 1000, 1),
+            "prompt_build_ms": round((prompt_finished - retrieval_finished) * 1000, 1),
+            "prompt_characters": total_characters,
+            "prompt_token_estimate": math.ceil(total_characters / 4),
+            "prompt_version": hashlib.sha256(self.system_prompt.encode("utf-8")).hexdigest()[:12],
+        }
         return self.system_prompt, user_prompt
 
     @staticmethod
