@@ -15,6 +15,7 @@ from gnaniassignment.llm.agents.generic import generic_agents
 from gnaniassignment.llm.generic_router import GenericRouter
 from gnaniassignment.llm.retrieval import PostgresKnowledgeStore, _knowledge_search_query
 from gnaniassignment.orchestration.graph import build_graph
+from gnaniassignment.orchestration.call_facts import apply_memory_operations, extract_deterministic_facts, render_call_facts
 from gnaniassignment.orchestration.session import TurnSession
 from gnaniassignment.order_data import customer_order_window
 from gnaniassignment.telephony.voicelink import _collect_turn_segments, _reply_to_transcript
@@ -42,6 +43,71 @@ class SemanticChat:
 
 
 class CallContextDeliveryTests(unittest.TestCase):
+    def test_deterministic_call_facts_preserve_exact_values_and_corrections(self):
+        facts = extract_deterministic_facts(
+            {}, "Mera naam Rahul hai, kal 6 baje party hai aur callback chahiye", 1,
+        )
+        self.assertEqual(facts["caller_name"]["value"], "Rahul")
+        self.assertEqual(facts["event_date"]["value"], "kal")
+        self.assertEqual(facts["event_time"]["value"], "6 baje")
+        self.assertIs(facts["callback_requested"]["value"], True)
+
+        corrected = extract_deterministic_facts(facts, "Nahi, 7 baje. Callback nahi chahiye", 2)
+        self.assertEqual(corrected["event_time"]["value"], "7 baje")
+        self.assertEqual(corrected["event_time"]["previous_value"], "6 baje")
+        self.assertEqual(corrected["event_time"]["supersedes_turn"], 1)
+        self.assertEqual(corrected["event_time"]["status"], "corrected")
+        self.assertIs(corrected["callback_requested"]["value"], False)
+
+    def test_model_memory_operations_require_allowed_fields_and_current_evidence(self):
+        operations = [
+            {"operation": "set", "field": "message", "value": "Party is tomorrow", "evidence": "kal party hai"},
+            {"operation": "set", "field": "owner_notified", "value": True, "evidence": "kal party hai"},
+            {"operation": "set", "field": "caller_name", "value": "Rohit", "evidence": "mera naam Rohit hai"},
+        ]
+        facts, audit = apply_memory_operations({}, operations, "kal party hai", 1)
+        self.assertEqual(facts["message"]["value"], "Party is tomorrow")
+        self.assertNotIn("owner_notified", facts)
+        self.assertNotIn("caller_name", facts)
+        self.assertEqual([entry["accepted"] for entry in audit], [True, False, False])
+        self.assertEqual(audit[1]["reason"], "unsupported_field")
+        self.assertEqual(audit[2]["reason"], "evidence_not_in_current_transcript")
+
+    def test_session_combines_structured_facts_with_rolling_semantic_memo(self):
+        class StructuredChat:
+            def __init__(self): self.prompts = []
+            def complete(self, _system, user):
+                self.prompts.append(user)
+                if len(self.prompts) == 1:
+                    return json.dumps({
+                        "answer": "Theek hai, main note kar leti hoon.",
+                        "memory_summary": "Caller wants Tushar informed about tomorrow's 6 PM party.",
+                        "memory_operations": [{
+                            "operation": "set", "field": "message",
+                            "value": "Party is tomorrow at 6 PM", "evidence": "kal 6 baje party hai",
+                        }],
+                    })
+                return json.dumps({
+                    "answer": "Theek hai, 7 baje note kar liya.",
+                    "memory_summary": "Caller corrected tomorrow's party time to 7 PM.",
+                    "memory_operations": [{
+                        "operation": "replace", "field": "message",
+                        "value": "Party is tomorrow at 7 PM", "evidence": "Nahi 7 baje",
+                    }],
+                })
+
+        chat = StructuredChat()
+        session = TurnSession(build_graph(GenericRouter(), generic_agents(chat)))
+        session.ask("kal 6 baje party hai")
+        self.assertEqual(session.call_facts["message"]["value"], "Party is tomorrow at 6 PM")
+        session.ask("Nahi, 7 baje")
+
+        self.assertIn("- event_time: 7 baje (corrected)", chat.prompts[-1])
+        self.assertIn("- message: Party is tomorrow at 6 PM (confirmed)", chat.prompts[-1])
+        self.assertEqual(session.call_facts["message"]["value"], "Party is tomorrow at 7 PM")
+        self.assertEqual(session.call_facts["event_time"]["previous_value"], "6 baje")
+        self.assertIn("Structured call facts", render_call_facts(session.call_facts))
+
     def test_provider_final_skips_endpoint_grace(self):
         async def check():
             turns = asyncio.Queue()

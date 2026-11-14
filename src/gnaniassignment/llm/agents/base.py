@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 
 @dataclass(frozen=True)
 class AgentResponse:
     answer: str
     memory_summary: str
+    memory_operations: tuple[dict[str, Any], ...] = ()
 
 
 class SubAgent:

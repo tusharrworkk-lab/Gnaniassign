@@ -156,8 +156,11 @@ class EnquiryAgent(SubAgent):
                 raise ValueError("Invalid response fields")
             answer = payload["answer"].strip()
             summary = payload["memory_summary"].strip()[:MAX_SUMMARY_CHARS]
+            operations = payload.get("memory_operations", [])
+            if not isinstance(operations, list) or any(not isinstance(item, dict) for item in operations):
+                raise ValueError("Invalid memory_operations field")
             if answer and summary:
-                return AgentResponse(answer=answer, memory_summary=summary)
+                return AgentResponse(answer=answer, memory_summary=summary, memory_operations=tuple(operations))
         except (json.JSONDecodeError, ValueError):
             if raw.lstrip().startswith("{"):
                 raise ValueError("Subagent returned malformed JSON") from None

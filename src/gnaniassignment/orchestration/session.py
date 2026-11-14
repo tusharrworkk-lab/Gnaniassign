@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from gnaniassignment.orchestration.episodic_memory import EpisodicMemoryStore
 from gnaniassignment.llm.memory import ChatTurn
+from gnaniassignment.orchestration.call_facts import apply_memory_operations, extract_deterministic_facts
 from gnaniassignment.orchestration.working_memory import update_working_memory
 from gnaniassignment.conversation_analytics import AcilConversationTracer, ConversationJudge, ConversationRecord, PostgresConversationStore, flow_flags
 
@@ -49,6 +50,10 @@ class TurnSession:
         self.delivery_statuses: list[str] = []
         self.handed_off_answers: list[str] = []
         self.call_memo = ""
+        self.call_facts: dict[str, dict[str, Any]] = {}
+        self.call_fact_audit: list[dict[str, Any]] = []
+        self.call_fact_audits: list[list[dict[str, Any]]] = []
+        self.call_fact_snapshots: list[dict[str, dict[str, Any]]] = []
         self._deferred_records: dict[int, ConversationRecord | None] = {}
         self.stt_segments: list[dict[str, object]] = []
         self.account_context_provider = account_context_provider
@@ -74,11 +79,16 @@ class TurnSession:
             return {"spoken": None, "replies": []}
         text = " ".join(self.phrases)
         self.phrases = []
+        turn_number = len(self.call_turns) + 1
+        # Exact identifiers, dates, times and callback signals are extracted
+        # before generation, so the current answer can already use them. This
+        # is deterministic local work and adds no second model request.
+        self.call_facts = extract_deterministic_facts(self.call_facts, text, turn_number)
         try:
             if self.account_context_provider is not None:
                 self.account_context = self.account_context_provider(text, self.working_memory)
             config = {"configurable": {"on_answer_chunk": on_chunk}} if on_chunk is not None else None
-            result = self.graph.invoke({"session_id": self.session_id, "text": text, "answers": {}, "intent": "", "topic": "", "history": self.history, "prior_call_context": self.prior_call_context, "current_call_history": self.call_context_turns, "call_memo": self.call_memo or "No call memo yet.", "working_memory": self.working_memory, "account_context": self.account_context, "memory": "", "replies": [], "spoken": None, "metrics": {}}, config=config)
+            result = self.graph.invoke({"session_id": self.session_id, "text": text, "answers": {}, "intent": "", "topic": "", "history": self.history, "prior_call_context": self.prior_call_context, "current_call_history": self.call_context_turns, "call_memo": self.call_memo or "No call memo yet.", "call_facts": self.call_facts, "working_memory": self.working_memory, "account_context": self.account_context, "memory": "", "replies": [], "spoken": None, "metrics": {}}, config=config)
         except Exception:
             if not defer_delivery:
                 self.phrases = [text]
@@ -86,6 +96,16 @@ class TurnSession:
         self.working_memory = result["working_memory"]
         reply_data = result["replies"][0]
         reply = reply_data["text"]
+        self.call_facts, fact_audit = apply_memory_operations(
+            self.call_facts,
+            reply_data.get("memory_operations", []),
+            text,
+            turn_number,
+        )
+        self.call_fact_audit.extend(fact_audit)
+        self.call_fact_audits.append(fact_audit)
+        self.call_fact_snapshots.append({name: dict(entry) for name, entry in self.call_facts.items()})
+        result["call_facts"] = self.call_facts
         turn = ChatTurn(query=text, answer=reply, summary=reply_data["summary"], intent=result["intent"], topic=result["topic"])
         self.history.append(turn)
         self.call_turns.append(turn)
@@ -98,11 +118,16 @@ class TurnSession:
             decision = result.get("answers", {}).get("intent", {})
             classifier_intent = decision.get("choice") if isinstance(decision.get("choice"), str) and decision.get("choice") != "generic" else None
             classifier_confidence = float(decision["confidence"]) if classifier_intent and isinstance(decision.get("confidence"), (int, float)) else None
+            persisted_memory = dict(self.working_memory)
+            persisted_memory.update({
+                f"fact.{name}": str(entry.get("value"))
+                for name, entry in self.call_facts.items()
+            })
             record = ConversationRecord(
                 event_id=str(uuid4()), session_id=self.session_id, turn_number=len(self.history),
                 customer_id=self.customer_id, user_text=text, response_text=reply,
                 routed_intent=result["intent"], classifier_intent=classifier_intent,
-                classifier_confidence=classifier_confidence, working_memory=dict(self.working_memory),
+                classifier_confidence=classifier_confidence, working_memory=persisted_memory,
                 flow_flags=flow_flags(reply, self.working_memory),
             )
         if defer_delivery:
@@ -194,6 +219,8 @@ class TurnSession:
              "assistant": self.handed_off_answers[index - 1],
              "generated_assistant": turn.answer,
              "routed_intent": turn.intent, "summary": turn.summary,
+             "structured_facts": self.call_fact_snapshots[index - 1] if index - 1 < len(self.call_fact_snapshots) else {},
+             "fact_operation_audit": self.call_fact_audits[index - 1] if index - 1 < len(self.call_fact_audits) else [],
              "delivery_status": self.delivery_statuses[index - 1]}
             for index, turn in enumerate(self.call_turns, start=1)
         ]
