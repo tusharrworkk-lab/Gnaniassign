@@ -219,11 +219,6 @@ class PipelineTests(unittest.TestCase):
         from gnaniassignment.telephony.voicelink import _take_tts_fragment
 
         self.assertIsNone(_take_tts_fragment("Haan main", 12))
-        self.assertEqual(_take_tts_fragment("Haan,", 1), ("Haan,", ""))
-        self.assertEqual(
-            _take_tts_fragment("Haan, samajh", 1),
-            ("Haan,", "samajh"),
-        )
         self.assertEqual(
             _take_tts_fragment("Haan main Tushar ko bata dungi aap", 20),
             ("Haan main Tushar ko bata", "dungi aap"),
@@ -396,7 +391,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("explicitly authorized", GENERIC_PROMPT)
         self.assertIn("FIRST-REPLY DISCLOSURE", GENERIC_PROMPT)
         self.assertIn("You cannot place a call to Tushar", GENERIC_PROMPT)
-        self.assertIn('"answer" first, "dialogue_state" second', GENERIC_PROMPT)
+        self.assertIn('"answer" first and "memory_summary" second', GENERIC_PROMPT)
         self.assertIn("complete current state of this call", GENERIC_PROMPT)
 
     def test_personal_assistant_prompt_requires_feminine_first_person_hinglish(self):

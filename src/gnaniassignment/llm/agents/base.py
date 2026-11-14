@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 
@@ -11,7 +11,6 @@ class AgentResponse:
     answer: str
     memory_summary: str
     memory_operations: tuple[dict[str, Any], ...] = ()
-    dialogue_state: dict[str, Any] = field(default_factory=dict)
 
 
 class SubAgent:
