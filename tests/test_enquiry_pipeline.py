@@ -552,7 +552,9 @@ class PipelineTests(unittest.TestCase):
                 self.sent.append(message)
 
             async def recv(self):
-                return self.messages.pop(0)
+                if self.messages:
+                    return self.messages.pop(0)
+                await asyncio.Future()
 
             async def close(self):
                 return None
@@ -577,6 +579,46 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(request["voice"], "Shivani")
         self.assertEqual(request["language"], "hi-en")
         self.assertEqual(request["audio_config"]["container"], "raw")
+
+    def test_tts_consumes_complete_before_reusing_socket(self):
+        class Socket:
+            def __init__(self):
+                self.sent = []
+                self.messages = [
+                    '{"type":"start"}',
+                    '{"type":"audio","data":{"chunk_index":1,"audio":"YWJj","is_final":true}}',
+                    '{"type":"complete","data":{"chunk_index":2,"audio":"","is_final":true}}',
+                    '{"type":"complete","request_id":"request-1"}',
+                    '{"type":"start"}',
+                    '{"type":"audio","data":{"chunk_index":1,"audio":"ZGVm","is_final":true}}',
+                    '{"type":"complete","data":{"chunk_index":2,"audio":"","is_final":true}}',
+                    '{"type":"complete","request_id":"request-2"}',
+                ]
+
+            async def send(self, message):
+                self.sent.append(message)
+
+            async def recv(self):
+                return self.messages.pop(0)
+
+            async def close(self):
+                return None
+
+        socket = Socket()
+
+        async def connect(_endpoint, _headers):
+            return socket
+
+        async def synthesize_twice():
+            async with GnaniRealtimeTts(api_key="test-key", connect=connect) as tts:
+                first = [chunk.audio async for chunk in tts.synthesize("First")]
+                second = [chunk.audio async for chunk in tts.synthesize("Second")]
+                return first, second
+
+        first, second = asyncio.run(synthesize_twice())
+        self.assertEqual(first, [b"abc"])
+        self.assertEqual(second, [b"def"])
+        self.assertEqual(len(socket.sent), 2)
 
     def test_tts_reopens_an_idle_closed_provider_socket_before_a_reply(self):
         connections = []
