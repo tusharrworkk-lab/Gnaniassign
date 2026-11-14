@@ -46,6 +46,7 @@ class TurnSession:
         # handed to the caller may become assistant context for another turn.
         self.call_context_turns: list[ChatTurn] = []
         self.delivery_statuses: list[str] = []
+        self.handed_off_answers: list[str] = []
         self._deferred_records: dict[int, ConversationRecord | None] = {}
         self.stt_segments: list[dict[str, object]] = []
         self.account_context_provider = account_context_provider
@@ -87,6 +88,7 @@ class TurnSession:
         self.history.append(turn)
         self.call_turns.append(turn)
         self.delivery_statuses.append("generated")
+        self.handed_off_answers.append("")
         if len(self.history) > MAX_HISTORY_TURNS:
             del self.history[:-MAX_HISTORY_TURNS]
         record: ConversationRecord | None = None
@@ -119,7 +121,7 @@ class TurnSession:
             if self.tracer is not None:
                 self.tracer.emit_turn(record)
 
-    def mark_delivery(self, status: str) -> bool:
+    def mark_delivery(self, status: str, *, handed_off_text: str = "") -> bool:
         """Set the latest generated turn's delivery outcome for prompt memory."""
         if status not in {"delivered", "audio_sent", "interrupted", "failed"}:
             raise ValueError("Unsupported delivery status")
@@ -130,7 +132,21 @@ class TurnSession:
         turn = self.call_turns[pending]
         self.delivery_statuses[pending] = status
         if status in {"delivered", "audio_sent"}:
+            self.handed_off_answers[pending] = turn.answer
             self.call_context_turns.append(turn)
+        elif handed_off_text.strip():
+            spoken = handed_off_text.strip()
+            self.handed_off_answers[pending] = spoken
+            self.call_context_turns.append(ChatTurn(
+                query=turn.query,
+                answer=spoken,
+                summary=(
+                    f"Caller said: {turn.query[:220]}. Assistant audio handed off before {status}: "
+                    f"{spoken[:180]}. The rest of the generated reply was not handed off."
+                ),
+                intent=turn.intent,
+                topic=turn.topic,
+            ))
         else:
             self.record_unanswered_request(turn.query, status=status, intent=turn.intent, topic=turn.topic)
         if pending in self._deferred_records:
@@ -160,7 +176,7 @@ class TurnSession:
             return None
         transcript = [
             {"turn_number": index, "user": turn.query,
-             "assistant": turn.answer if self.delivery_statuses[index - 1] in {"delivered", "audio_sent"} else "",
+             "assistant": self.handed_off_answers[index - 1],
              "generated_assistant": turn.answer,
              "routed_intent": turn.intent, "summary": turn.summary,
              "delivery_status": self.delivery_statuses[index - 1]}

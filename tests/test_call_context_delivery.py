@@ -16,7 +16,7 @@ from gnaniassignment.llm.retrieval import PostgresKnowledgeStore, _knowledge_sea
 from gnaniassignment.orchestration.graph import build_graph
 from gnaniassignment.orchestration.session import TurnSession
 from gnaniassignment.order_data import customer_order_window
-from gnaniassignment.telephony.voicelink import _reply_to_transcript
+from gnaniassignment.telephony.voicelink import _collect_turn_segments, _reply_to_transcript
 from gnaniassignment.voice.events import VoiceTranscript
 
 
@@ -30,6 +30,38 @@ class Chat:
 
 
 class CallContextDeliveryTests(unittest.TestCase):
+    def test_provider_final_skips_endpoint_grace(self):
+        async def check():
+            turns = asyncio.Queue()
+            endpoint = asyncio.Event()
+            endpoint.set()
+            await turns.put(VoiceTranscript("Kal party hai", is_final=True))
+            return await asyncio.wait_for(_collect_turn_segments(
+                turns, endpoint, endpoint_mode=True, coalesce_ms=1100, grace_ms=1000,
+            ), timeout=0.5)
+
+        self.assertEqual([item.text for item in asyncio.run(check())], ["Kal party hai"])
+
+    def test_nonfinal_hypothesis_keeps_grace_for_provider_final(self):
+        async def check():
+            turns = asyncio.Queue()
+            endpoint = asyncio.Event()
+            endpoint.set()
+            await turns.put(VoiceTranscript("Kal party", segment_id="segment-1", is_final=False))
+
+            async def provider_final():
+                await asyncio.sleep(0.02)
+                await turns.put(VoiceTranscript("Kal party hai", segment_id="segment-1", is_final=True))
+
+            producer = asyncio.create_task(provider_final())
+            segments = await _collect_turn_segments(
+                turns, endpoint, endpoint_mode=True, coalesce_ms=1100, grace_ms=250,
+            )
+            await producer
+            return segments
+
+        self.assertEqual([item.text for item in asyncio.run(check())], ["Kal party hai"])
+
     def test_voicelink_marks_audio_sent_only_after_speech_handoff(self):
         class Session:
             def __init__(self): self.statuses = []
@@ -72,6 +104,51 @@ class CallContextDeliveryTests(unittest.TestCase):
         self.assertEqual(call.spoken, ["Theek hai."])
         self.assertEqual(call.session.statuses, ["tts_handed_off", "audio_sent"])
 
+    def test_voicelink_passes_completed_fragment_on_barge_in(self):
+        class Session:
+            def __init__(self): self.delivery = None
+
+            def ask_stream(self, _text, on_chunk, *, defer_delivery):
+                assert defer_delivery
+                on_chunk("Haan.")
+                on_chunk(" Aur main aage bataungi.")
+                return {"intent": "generic", "spoken": "Haan. Aur main aage bataungi."}
+
+            def mark_delivery(self, status, *, handed_off_text=""):
+                self.delivery = (status, handed_off_text)
+                return True
+
+            def record_stt_segment(self, *_args): pass
+
+        class Call:
+            def __init__(self):
+                self.started_at = time.perf_counter()
+                self.reply_interrupted = asyncio.Event()
+                self.session = Session()
+                self.stream_sid = "test-stream"
+                self.customer_id = "test-caller"
+                self.turn_index = 1
+                self.spoken = []
+
+            async def begin_turn_evaluation(self): pass
+            async def finish_turn_evaluation(self, _outcome): pass
+            async def metric(self, **_values): pass
+            async def trace(self, *_args, **_values): pass
+            def note_llm_first_token(self): pass
+
+            async def speak_reply(self, text, **_kwargs):
+                self.spoken.append(text)
+                if len(self.spoken) == 2:
+                    self.reply_interrupted.set()
+                    return False
+                return True
+
+        call = Call()
+        with patch.dict("os.environ", {"GNANI_TTS_POST_RESPONSE_CLEAR_THROAT_ENABLED": "false"}):
+            asyncio.run(_reply_to_transcript(call, VoiceTranscript("Kal party hai"), None))
+        self.assertEqual(call.spoken, ["Haan.", "Aur main aage bataungi."])
+        self.assertEqual(call.session.delivery, ("interrupted", "Haan."))
+
     def test_interrupted_answer_is_not_replayed_as_heard(self):
         chat = Chat()
         session = TurnSession(build_graph(GenericRouter(), generic_agents(chat)))
@@ -84,6 +161,18 @@ class CallContextDeliveryTests(unittest.TestCase):
         self.assertEqual(session.delivery_statuses, ["interrupted", "delivered"])
         self.assertIn("Caller said: Kal chhah baje party hai", chat.prompts[-1])
         self.assertIn("do not assume the caller heard it", chat.prompts[-1])
+        self.assertNotIn("Answer: Theek hai, main note kar leti hoon", chat.prompts[-1])
+
+    def test_interrupted_answer_keeps_only_completed_audio_fragments(self):
+        chat = Chat()
+        session = TurnSession(build_graph(GenericRouter(), generic_agents(chat)))
+        session.ask_stream("Kal chhah baje party hai", lambda _text: None, defer_delivery=True)
+        self.assertTrue(session.mark_delivery("interrupted", handed_off_text="Theek hai,"))
+        self.assertEqual(session.call_context_turns[0].answer, "Theek hai,")
+        self.assertEqual(session.handed_off_answers, ["Theek hai,"])
+        session.ask("Bata dogi?")
+        self.assertIn("Theek hai,", chat.prompts[-1])
+        self.assertIn("rest of the generated reply was not handed off", chat.prompts[-1])
         self.assertNotIn("Answer: Theek hai, main note kar leti hoon", chat.prompts[-1])
 
     def test_sent_audio_becomes_next_turn_context(self):
@@ -136,6 +225,21 @@ class CallContextDeliveryTests(unittest.TestCase):
         self.assertEqual(judge.seen[0]["assistant"], "")
         self.assertNotIn("generated_assistant", judge.seen[0])
         self.assertEqual(store.saved[0]["delivery_status"], "interrupted")
+        self.assertEqual(store.saved[0]["generated_assistant"], "Theek hai, main note kar leti hoon.")
+
+    def test_judge_sees_partial_handoff_separately_from_generated_answer(self):
+        class Store:
+            def __init__(self): self.saved = None
+            def attach_followup(self, *_args): return []
+            def append(self, *_args): pass
+            def finalize_call(self, *_args): self.saved = _args[3]
+
+        store = Store()
+        session = TurnSession(build_graph(GenericRouter(), generic_agents(Chat())), conversation_store=store)
+        session.ask_stream("Kal party hai", lambda _text: None, defer_delivery=True)
+        session.mark_delivery("interrupted", handed_off_text="Theek hai,")
+        session.finalize_call()
+        self.assertEqual(store.saved[0]["assistant"], "Theek hai,")
         self.assertEqual(store.saved[0]["generated_assistant"], "Theek hai, main note kar leti hoon.")
 
     def test_order_window_reuses_same_order_and_refreshes_new_id(self):
