@@ -9,7 +9,10 @@ from uuid import uuid4
 from gnaniassignment.orchestration.episodic_memory import EpisodicMemoryStore
 from gnaniassignment.llm.memory import ChatTurn
 from gnaniassignment.orchestration.call_facts import apply_memory_operations, extract_deterministic_facts
-from gnaniassignment.orchestration.working_memory import update_working_memory
+from gnaniassignment.orchestration.interaction_state import (
+    merge_delivered_interaction_state,
+    partial_delivery_context,
+)
 from gnaniassignment.conversation_analytics import AcilConversationTracer, ConversationJudge, ConversationRecord, PostgresConversationStore, flow_flags
 
 
@@ -21,7 +24,17 @@ logger = logging.getLogger(__name__)
 
 
 class TurnSession:
-    def __init__(self, graph: Any, memory_store: EpisodicMemoryStore | None = None, customer_id: str | None = None, conversation_store: PostgresConversationStore | None = None, tracer: AcilConversationTracer | None = None, call_judge: ConversationJudge | None = None, account_context_provider: Callable[[str, dict[str, str]], str] | None = None, session_id: str | None = None) -> None:
+    def __init__(
+        self,
+        graph: Any,
+        memory_store: EpisodicMemoryStore | None = None,
+        customer_id: str | None = None,
+        conversation_store: PostgresConversationStore | None = None,
+        tracer: AcilConversationTracer | None = None,
+        call_judge: ConversationJudge | None = None,
+        account_context_provider: Callable[[str, dict[str, str]], str] | None = None,
+        session_id: str | None = None,
+    ) -> None:
         self.graph: Any = graph
         self.phrases: list[str] = []
         self.memory_store = memory_store
@@ -54,6 +67,8 @@ class TurnSession:
         self.call_fact_audit: list[dict[str, Any]] = []
         self.call_fact_audits: list[list[dict[str, Any]]] = []
         self.call_fact_snapshots: list[dict[str, dict[str, Any]]] = []
+        self.interaction_state: dict[str, Any] = {}
+        self._generated_interaction_states: dict[int, dict[str, Any]] = {}
         self._deferred_records: dict[int, ConversationRecord | None] = {}
         self.stt_segments: list[dict[str, object]] = []
         self.account_context_provider = account_context_provider
@@ -88,7 +103,7 @@ class TurnSession:
             if self.account_context_provider is not None:
                 self.account_context = self.account_context_provider(text, self.working_memory)
             config = {"configurable": {"on_answer_chunk": on_chunk}} if on_chunk is not None else None
-            result = self.graph.invoke({"session_id": self.session_id, "text": text, "answers": {}, "intent": "", "topic": "", "history": self.history, "prior_call_context": self.prior_call_context, "current_call_history": self.call_context_turns, "call_memo": self.call_memo or "No call memo yet.", "call_facts": self.call_facts, "working_memory": self.working_memory, "account_context": self.account_context, "memory": "", "replies": [], "spoken": None, "metrics": {}}, config=config)
+            result = self.graph.invoke({"session_id": self.session_id, "text": text, "answers": {}, "intent": "", "topic": "", "history": self.history, "prior_call_context": self.prior_call_context, "current_call_history": self.call_context_turns, "call_memo": self.call_memo or "No call memo yet.", "call_facts": self.call_facts, "interaction_state": self.interaction_state, "working_memory": self.working_memory, "account_context": self.account_context, "memory": "", "replies": [], "spoken": None, "metrics": {}}, config=config)
         except Exception:
             if not defer_delivery:
                 self.phrases = [text]
@@ -109,6 +124,7 @@ class TurnSession:
         turn = ChatTurn(query=text, answer=reply, summary=reply_data["summary"], intent=result["intent"], topic=result["topic"])
         self.history.append(turn)
         self.call_turns.append(turn)
+        self._generated_interaction_states[len(self.call_turns) - 1] = reply_data.get("dialogue_state", {})
         self.delivery_statuses.append("generated")
         self.handed_off_answers.append("")
         if len(self.history) > MAX_HISTORY_TURNS:
@@ -161,6 +177,11 @@ class TurnSession:
         if status in {"delivered", "audio_sent"}:
             self.handed_off_answers[pending] = turn.answer
             self.call_context_turns.append(turn)
+            self.interaction_state = merge_delivered_interaction_state(
+                self.interaction_state,
+                self._generated_interaction_states.pop(pending, {}),
+                turn.answer,
+            )
         elif handed_off_text.strip():
             spoken = handed_off_text.strip()
             self.handed_off_answers[pending] = spoken
@@ -174,8 +195,12 @@ class TurnSession:
                 intent=turn.intent,
                 topic=turn.topic,
             ))
+            self._generated_interaction_states.pop(pending, None)
+            if pending == len(self.call_turns) - 1:
+                self.interaction_state = partial_delivery_context(self.interaction_state, spoken)
         else:
             self.record_unanswered_request(turn.query, status=status, intent=turn.intent, topic=turn.topic)
+            self._generated_interaction_states.pop(pending, None)
         self._update_call_memo(turn, status)
         if pending in self._deferred_records:
             record = self._deferred_records.pop(pending)

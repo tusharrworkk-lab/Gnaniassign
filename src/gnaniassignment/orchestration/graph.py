@@ -13,6 +13,7 @@ from gnaniassignment.domain.ports import IntentRouter
 from gnaniassignment.llm.agents import AgentResponse, SubAgent
 from gnaniassignment.llm.memory import ChatTurn, render_memory, topic_from_query
 from gnaniassignment.orchestration.call_facts import render_call_facts
+from gnaniassignment.orchestration.interaction_state import render_interaction_state
 from gnaniassignment.orchestration.working_memory import render_working_memory, update_working_memory
 from gnaniassignment.llm.prompts.intents import INTENT_KEYS, QUESTIONS
 
@@ -30,6 +31,7 @@ class TurnState(TypedDict):
     current_call_history: list[ChatTurn]
     call_memo: str
     call_facts: dict[str, dict[str, Any]]
+    interaction_state: dict[str, Any]
     working_memory: dict[str, str]
     account_context: str
     memory: str
@@ -99,12 +101,15 @@ def build_graph(
             if state["prior_call_context"]
             else "Prior-call memory: no completed-call summary is available."
         )
+        interaction_context = render_interaction_state(state.get("interaction_state", {}))
+        if interaction_context:
+            interaction_context = "\n\n" + interaction_context
         return {
             "answers": answers,
             "intent": intent,
             "topic": topic,
             "working_memory": working_memory,
-            "memory": render_working_memory(working_memory) + "\n\n" + render_call_facts(state["call_facts"]) + "\n\n" + state["account_context"] + "\n\n" + call_status + "\n\n" + recall_availability + "\n\nCall working memo (concise state of this open call):\n" + state["call_memo"] + "\n\nCurrent call context:\n" + render_memory(active_memory) + "\n\nRelevant prior-call context:\n" + render_memory(prior_memory),
+            "memory": render_working_memory(working_memory) + "\n\n" + render_call_facts(state["call_facts"]) + "\n\n" + state["account_context"] + "\n\n" + call_status + "\n\n" + recall_availability + interaction_context + "\n\nCall working memo (concise state of this open call):\n" + state["call_memo"] + "\n\nCurrent call context:\n" + render_memory(active_memory) + "\n\nRelevant prior-call context:\n" + render_memory(prior_memory),
             "metrics": {"intent_ms": (time.perf_counter() - started) * 1000},
         }
 
@@ -135,6 +140,7 @@ def build_graph(
                 "text": output.answer,
                 "summary": output.memory_summary,
                 "memory_operations": list(output.memory_operations),
+                "dialogue_state": output.dialogue_state or {},
             }
         else:
             reply = {"agent": clarification_agent.name, "text": output, "summary": f"User asked: {state['text']}. Clarification: {output[:280]}"}
@@ -175,6 +181,7 @@ def _agent_node(agent: SubAgent):
                 "text": output.answer,
                 "summary": output.memory_summary,
                 "memory_operations": list(output.memory_operations),
+                "dialogue_state": output.dialogue_state or {},
             }
         else:
             reply = {"agent": agent.name, "text": output, "summary": f"User asked: {state['text']}. Answer: {output[:280]}"}
