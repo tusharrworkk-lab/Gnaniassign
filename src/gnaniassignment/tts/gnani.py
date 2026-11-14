@@ -71,9 +71,11 @@ class GnaniTtsError(RuntimeError):
 class GnaniRealtimeTts:
     """One persistent Gnani WebSocket which streams decoded TTS audio.
 
-    The defaults generate 24 kHz, mono, signed-16-bit raw PCM. This avoids
-    container buffering and lets a caller write each yielded block directly to
-    its speaker or telephony output. ``synthesize`` calls must not overlap.
+    The default is native 8 kHz G.711 A-law for VoiceLink telephony. Gnani
+    streams that wire format directly, avoiding an application-side resample
+    and companding pass. Raw signed-16-bit PCM remains available for local
+    playback by setting ``GNANI_TTS_CONTAINER=raw``. ``synthesize`` calls must
+    not overlap.
     """
 
     def __init__(
@@ -85,6 +87,7 @@ class GnaniRealtimeTts:
         language: str | None = None,
         speed: float | None = None,
         sample_rate: int | None = None,
+        container: str | None = None,
         connect: Callable[[str, dict[str, str]], Awaitable[Any]] | None = None,
     ) -> None:
         self.api_key = api_key or os.getenv("GNANI_API_KEY")
@@ -96,7 +99,16 @@ class GnaniRealtimeTts:
         self.language = language or os.getenv("GNANI_TTS_LANGUAGE", "hi-en")
         self.speed = speed if speed is not None else float(os.getenv("GNANI_TTS_SPEED", "1.0"))
         self.audio_tags = os.getenv("GNANI_TTS_AUDIO_TAGS", "false").lower() in {"1", "true", "yes", "on"}
-        self.sample_rate = sample_rate or int(os.getenv("GNANI_TTS_SAMPLE_RATE", "24000"))
+        self.container = (container or os.getenv("GNANI_TTS_CONTAINER", "alaw")).strip().lower()
+        if self.container not in {"raw", "alaw"}:
+            raise ValueError("GNANI_TTS_CONTAINER must be 'raw' or 'alaw'")
+        configured_sample_rate = sample_rate or int(os.getenv("GNANI_TTS_SAMPLE_RATE", "8000"))
+        # Gnani documents raw G.711 A-law as fixed at 8 kHz. Keep the runtime
+        # value aligned with the bytes actually returned even when an older
+        # deployment still carries GNANI_TTS_SAMPLE_RATE=24000.
+        self.sample_rate = 8000 if self.container == "alaw" else configured_sample_rate
+        self.output_encoding = "audio/alaw" if self.container == "alaw" else "audio/l16"
+        self.bytes_per_sample = 1 if self.container == "alaw" else 2
         if self.model not in {"timbre-v2.5", "timbre-v3.0"}:
             raise ValueError("GNANI_TTS_MODEL must be 'timbre-v2.5' or 'timbre-v3.0'")
         if self.language not in {"auto", "hi-IN", "en-IN", "hi-en"}:
@@ -151,19 +163,20 @@ class GnaniRealtimeTts:
         rendered = decorate_tts_text(text, enabled=self.audio_tags, model=self.model, add_clear_throat=add_clear_throat, latency_giggle=latency_giggle)
         if not rendered:
             raise ValueError("TTS latency cue requires GNANI_TTS_AUDIO_TAGS=true and timbre-v3.0")
+        audio_config: dict[str, Any] = {
+            "sample_rate": self.sample_rate,
+            "num_channels": 1,
+            "container": self.container,
+        }
+        if self.container == "raw":
+            audio_config.update({"sample_width": 2, "encoding": "linear_pcm"})
         return {
             "text": rendered,
             "voice": self.voice,
             "model": self.model,
             "language": self.language,
             "speed": self.speed,
-            "audio_config": {
-                "sample_rate": self.sample_rate,
-                "num_channels": 1,
-                "sample_width": 2,
-                "encoding": "linear_pcm",
-                "container": "raw",
-            },
+            "audio_config": audio_config,
         }
 
     async def __aenter__(self) -> "GnaniRealtimeTts":

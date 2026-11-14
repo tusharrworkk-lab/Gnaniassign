@@ -328,6 +328,32 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertEqual(base64.b64decode(messages[0]["media"]["payload"]), b"\x10\x27" * 320)
 
+    def test_voicelink_native_alaw_bypasses_resampling_and_reencoding(self):
+        import base64
+        from unittest.mock import patch
+        from gnaniassignment.telephony.voicelink import VoiceLinkCall, VoiceLinkMediaFormat
+
+        class WebSocket:
+            def __init__(self): self.messages = []
+            async def send_json(self, message): self.messages.append(message)
+
+        async def run():
+            socket = WebSocket()
+            tts = type("Tts", (), {"sample_rate": 8000, "output_encoding": "audio/alaw"})()
+            call = VoiceLinkCall(socket, "stream-1", "call-1", "caller", "customer", object(),
+                                 tts, object(), media_format=VoiceLinkMediaFormat("audio/alaw", 8000))
+            native_alaw = bytes(range(160))
+            with (
+                patch("gnaniassignment.telephony.voicelink.audioop.ratecv", side_effect=AssertionError("resampled")),
+                patch("gnaniassignment.telephony.voicelink.audioop.lin2alaw", side_effect=AssertionError("re-encoded")),
+            ):
+                await call.send_media(native_alaw)
+            return socket.messages, native_alaw
+
+        messages, native_alaw = asyncio.run(run())
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(base64.b64decode(messages[0]["media"]["payload"]), native_alaw)
+
     def test_voicelink_wire_formats_keep_their_actual_frame_size(self):
         from gnaniassignment.telephony.voicelink import VoiceLinkMediaFormat, _parse_media_format
 
@@ -536,7 +562,7 @@ class PipelineTests(unittest.TestCase):
     def test_gnani_pcm_frame_size_is_fixed(self):
         self.assertEqual(PCM_FRAME_BYTES, 1024)
 
-    def test_gnani_timbre_v3_tts_decodes_audio_chunks(self):
+    def test_gnani_timbre_v3_tts_requests_native_alaw_chunks(self):
         captured: dict[str, object] = {}
 
         class Socket:
@@ -578,7 +604,23 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(request["model"], "timbre-v3.0")
         self.assertEqual(request["voice"], "Shivani")
         self.assertEqual(request["language"], "hi-en")
-        self.assertEqual(request["audio_config"]["container"], "raw")
+        self.assertEqual(request["audio_config"], {
+            "sample_rate": 8000,
+            "num_channels": 1,
+            "container": "alaw",
+        })
+
+    def test_gnani_tts_raw_pcm_remains_available_for_local_tools(self):
+        tts = GnaniRealtimeTts(api_key="test-key", sample_rate=24000, container="raw")
+        self.assertEqual(tts.output_encoding, "audio/l16")
+        self.assertEqual(tts.bytes_per_sample, 2)
+        self.assertEqual(tts.request("Hello")["audio_config"], {
+            "sample_rate": 24000,
+            "num_channels": 1,
+            "container": "raw",
+            "sample_width": 2,
+            "encoding": "linear_pcm",
+        })
 
     def test_tts_consumes_complete_before_reusing_socket(self):
         class Socket:
