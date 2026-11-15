@@ -56,7 +56,7 @@ class GnaniRealtimeStt:
         self.api_key = api_key or os.getenv("GNANI_API_KEY")
         if not self.api_key:
             raise ValueError("Set GNANI_API_KEY in .env or pass api_key explicitly")
-        self.language_code = language_code or os.getenv("GNANI_STT_LANGUAGE", "en-IN")
+        self.language_code = language_code or os.getenv("GNANI_STT_LANGUAGE", "hi-IN")
         self.model = model or os.getenv("GNANI_STT_MODEL", "prisma-v3.0")
         if self.model not in {"prisma-v2.5", "prisma-v3.0"}:
             raise ValueError("GNANI_STT_MODEL must be prisma-v2.5 or prisma-v3.0")
