@@ -3,5 +3,10 @@
 services:
   api:
     image: gnani-voice-agent:vps
+    env_file:
+      # This file is ignored by Git and remains only on the VPS. `--env-file`
+      # alone only interpolates Compose values; it does not inject variables
+      # into the running API container.
+      - .env.local-cloud
     environment:
       AGENT_ENVIRONMENT: production
