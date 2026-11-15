@@ -59,6 +59,10 @@ export function fetchDashboardCall(sessionId) {
   return request(`/v1/dashboard/calls/${encodeURIComponent(sessionId)}`);
 }
 
+export function fetchVoiceEvaluation(limit = 500) {
+  return request(`/v1/dashboard/evals/voice?limit=${encodeURIComponent(limit)}`);
+}
+
 export function submitVoiceTurnFeedback(runId, turnNumber, { decision, comment }) {
   return request(`/v1/dashboard/evals/telephony/runs/${encodeURIComponent(runId)}/turns/${turnNumber}/feedback`, {
     method: "POST",
