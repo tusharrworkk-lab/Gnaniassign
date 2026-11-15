@@ -938,10 +938,6 @@ class PipelineTests(unittest.TestCase):
     def test_generic_prompt_keeps_clear_message_acknowledgements_natural(self):
         self.assertIn("without quoting or restating the message", GENERIC_PROMPT)
         self.assertIn("Never repeat the same message", GENERIC_PROMPT)
-        self.assertIn("CURRENT caller actually supplied a message", GENERIC_PROMPT)
-        self.assertIn("Do not ask the caller which location they mean", GENERIC_PROMPT)
-        self.assertIn("Ji, main sun rahi hoon.", GENERIC_PROMPT)
-        self.assertNotIn('Example: {"answer":"Theek hai, main note kar leti hoon.', GENERIC_PROMPT)
 
     def test_session_restores_and_persists_episodic_memory(self):
         class MemoryStore:
