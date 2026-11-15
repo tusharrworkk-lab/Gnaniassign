@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { appendPromptNode, createHarnessConversation, createGoogleCalendarConnectUrl, dashboardApiConfigured, dashboardDemo, disconnectGoogleCalendar, endHarnessConversation, fetchDashboardCall, fetchDashboardOverview, fetchGoogleCalendarStatus, fetchHarnessConversation, fetchPromptPlan, hasDashboardAccess, reviewIntent, reviewVoiceRule, saveDashboardAccessKey, sendHarnessTurn, streamRuntimeEvents, submitVoiceTurnFeedback } from "./api/client";
+import { appendPromptNode, createHarnessConversation, createGoogleCalendarConnectUrl, dashboardApiConfigured, dashboardDemo, disconnectGoogleCalendar, endHarnessConversation, fetchDashboardCall, fetchDashboardOverview, fetchGoogleCalendarStatus, fetchHarnessConversation, fetchPromptPlan, fetchVoiceEvaluation, hasDashboardAccess, reviewIntent, reviewVoiceRule, saveDashboardAccessKey, sendHarnessTurn, streamRuntimeEvents, submitVoiceTurnFeedback } from "./api/client";
 
 const iconPaths = {
   home: <><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1Z" /></>,
@@ -59,19 +59,30 @@ function App() {
   const [savingInstruction, setSavingInstruction] = useState(false);
   const [overview, setOverview] = useState(null);
   const [overviewState, setOverviewState] = useState(dashboardApiConfigured ? "loading" : "demo");
+  const [voiceEvaluation, setVoiceEvaluation] = useState(null);
+  const [metricsState, setMetricsState] = useState(dashboardApiConfigured ? "loading" : "demo");
   const [dashboardAccess, setDashboardAccess] = useState(() => hasDashboardAccess());
   const [callDetail, setCallDetail] = useState(null);
   const [callDetailState, setCallDetailState] = useState("idle");
   const reviewTriggerRef = useRef(null);
   const refreshOverview = async () => {
     if (!dashboardApiConfigured || !dashboardAccess) return;
-    try {
-      const next = await fetchDashboardOverview();
-      setOverview(next);
+    const [overviewResult, evaluationResult] = await Promise.allSettled([
+      fetchDashboardOverview(),
+      fetchVoiceEvaluation(),
+    ]);
+    if (overviewResult.status === "fulfilled") {
+      setOverview(overviewResult.value);
       setOverviewState("live");
-    } catch (error) {
+    } else {
       setOverviewState("error");
-      setNotice(`Dashboard data unavailable: ${error.message}`);
+      setNotice(`Dashboard data unavailable: ${overviewResult.reason.message}`);
+    }
+    if (evaluationResult.status === "fulfilled") {
+      setVoiceEvaluation(evaluationResult.value.summary);
+      setMetricsState("live");
+    } else {
+      setMetricsState("error");
     }
   };
   const dashboard = useMemo(
@@ -202,7 +213,7 @@ function App() {
           </section>
 
           <section className="today-section" aria-labelledby="today-heading">
-            <div className="section-heading"><div><h2 id="today-heading">Today’s call metrics</h2></div><button className="text-link" onClick={() => setActiveTab("calls")}>All calls <Icon name="chevron" size={15} /></button></div>
+            <div className="section-heading"><div><h2 id="today-heading">Today’s call metrics</h2></div><button className="text-link" onClick={() => setActiveTab("metrics")}>Latency details <Icon name="chevron" size={15} /></button></div>
             <div className="metrics-row">
               <div><strong>{dashboard.today.calls}</strong><span>calls handled</span></div>
               <div><strong>{dashboard.today.quality}</strong><span>reply reliability</span></div>
@@ -218,6 +229,7 @@ function App() {
         </>}
 
         {activeTab === "calls" && <CallsView conversations={dashboard.conversations} events={runtimeEvents} feedState={feedState} detail={callDetail} detailState={callDetailState} onOpen={openCall} onClose={() => { setCallDetail(null); setCallDetailState("idle"); }} />}
+        {activeTab === "metrics" && <LatencyView evaluation={voiceEvaluation || overview?.summary?.voice_evaluation} state={metricsState} onBack={() => setActiveTab("home")} onRefresh={refreshOverview} />}
         {activeTab === "review" && <ReviewView reviews={pendingReviews} onOpen={openReview} />}
         {activeTab === "settings" && <SettingsView
           instructionNodes={instructionNodes}
@@ -235,7 +247,10 @@ function App() {
         </div>
 
         <nav className="bottom-nav" aria-label="Primary navigation">
-          {[['home','Home'],['calls','Calls'],['review','Review'],['settings','Setup']].map(([id, label]) => <button key={id} className={activeTab === id ? "active" : ""} onClick={() => setActiveTab(id)} aria-current={activeTab === id ? "page" : undefined}><Icon name={id} /><span>{label}</span>{id === "review" && pendingReviews.length > 0 && <b className="nav-count">{pendingReviews.length}</b>}</button>)}
+          {[['home','Home'],['calls','Calls'],['review','Review'],['settings','Setup']].map(([id, label]) => {
+            const active = activeTab === id || (activeTab === "metrics" && id === "home");
+            return <button key={id} className={active ? "active" : ""} onClick={() => setActiveTab(id)} aria-current={active ? "page" : undefined}><Icon name={id} /><span>{label}</span>{id === "review" && pendingReviews.length > 0 && <b className="nav-count">{pendingReviews.length}</b>}</button>;
+          })}
         </nav>
 
         {selectedReview && <ReviewSheet item={selectedReview} onClose={closeReview} onApprove={(label) => markReviewed(selectedReview.id, label)} />}
@@ -331,6 +346,127 @@ function relativeTime(value) {
   return `${Math.floor(seconds / 86400)}d ago`;
 }
 
+const latencySections = [
+  {
+    key: "endpointing",
+    title: "Endpointing",
+    description: "How quickly caller speech becomes a committed turn.",
+    metrics: [
+      ["speech_end_to_commit_ms", "Speech end to commit"],
+      ["provider_final_wait_ms", "Provider final wait"],
+      ["vad_semantic_wait_ms", "Semantic turn wait"],
+      ["turn_queue_delay_ms", "Committed turn queue"],
+    ],
+  },
+  {
+    key: "prompt_formation",
+    title: "Prompt formation",
+    description: "Context retrieval and prompt assembly before inference.",
+    metrics: [
+      ["account_context_ms", "Account context"],
+      ["router_ms", "Intent routing"],
+      ["context_assembly_ms", "Context assembly"],
+      ["retrieval_ms", "Knowledge retrieval"],
+      ["prompt_build_ms", "Prompt build"],
+      ["prompt_characters", "Prompt characters", "value"],
+      ["prompt_token_estimate", "Estimated prompt tokens", "value"],
+    ],
+  },
+  {
+    key: "llm",
+    title: "LLM",
+    description: "Request setup, decoded answer TTFT, and stream completion.",
+    metrics: [
+      ["llm_request_setup_ms", "Request setup"],
+      ["provider_ttft_ms", "Provider TTFT"],
+      ["answer_decode_ttft_ms", "Decoded answer TTFT"],
+      ["e2e_first_answer_text_ms", "Commit to answer text"],
+      ["llm_total_stream_ms", "Full response stream"],
+    ],
+  },
+  {
+    key: "tts",
+    title: "TTS",
+    description: "From available answer text to synthesized audio.",
+    metrics: [
+      ["text_to_first_fragment_ms", "Text to first fragment"],
+      ["tts_connect_ms", "Provider connection"],
+      ["tts_ttfa_ms", "TTS first audio"],
+    ],
+  },
+  {
+    key: "telephony",
+    title: "Telephony",
+    description: "Audio handed to VoiceLink; this is not handset playback time.",
+    metrics: [
+      ["first_cue_audio_ms", "First cue audio"],
+      ["first_answer_audio_ms", "First response audio"],
+      ["first_real_answer_audio_ms", "First real answer audio"],
+      ["first_frame_send_ms", "First frame sent"],
+      ["outbound_frame_gap_p50_ms", "Frame-gap p50"],
+      ["outbound_frame_gap_p95_ms", "Frame-gap p95"],
+      ["outbound_frame_gap_max_ms", "Maximum frame gap"],
+      ["outbound_audio_duration_ms", "Outbound audio duration"],
+    ],
+  },
+];
+
+function formatLatency(value) {
+  if (!Number.isFinite(value)) return "—";
+  if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 1 : 2)} s`;
+  return `${Math.round(value)} ms`;
+}
+
+function formatCount(value) {
+  if (!Number.isFinite(value)) return "—";
+  return new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(value);
+}
+
+function LatencyMetricRow({ label, distribution, kind = "latency" }) {
+  const count = distribution?.count || 0;
+  const formatter = kind === "value" ? formatCount : formatLatency;
+  return <div className={`latency-metric-row ${count ? "" : "is-empty"}`}>
+    <div><strong>{label}</strong><small>{count ? `${count} measured turn${count === 1 ? "" : "s"}` : "No measurements yet"}</small></div>
+    <span>{formatter(distribution?.p50_ms ?? distribution?.p50)}</span>
+    <span>{formatter(distribution?.p95_ms ?? distribution?.p95)}</span>
+  </div>;
+}
+
+function LatencyView({ evaluation, state, onBack, onRefresh }) {
+  if (!evaluation && state === "loading") return <section className="tab-page latency-view"><button className="plain-link" onClick={onBack}>‹ Back home</button><div className="latency-skeleton" aria-label="Loading latency metrics"><i /><i /><i /><i /></div></section>;
+  if (!evaluation) return <section className="tab-page latency-view"><button className="plain-link" onClick={onBack}>‹ Back home</button><div className="event-empty"><Icon name="sliders" size={22} /><strong>Latency metrics unavailable</strong><p>Reconnect the operator API and complete a schema-v3 voice turn, then refresh this view.</p><button className="outline-action" onClick={onRefresh}>Try again</button></div></section>;
+
+  const completed = evaluation.turns?.completed || 0;
+  const excluded = evaluation.turns?.excluded_legacy_measurements || 0;
+  const schema = evaluation.definition?.measurement_schema_version || 3;
+  const decoded = evaluation.llm?.answer_decode_ttft_ms;
+  const synthesized = evaluation.tts?.tts_ttfa_ms;
+  const audible = evaluation.telephony?.first_real_answer_audio_ms;
+  return <section className="tab-page latency-view">
+    <div className="latency-nav"><button className="plain-link" onClick={onBack}>‹ Back home</button><button className="quiet-button" onClick={onRefresh}>Refresh</button></div>
+    <div className="latency-heading"><div><h2>Voice latency</h2><p>Where a committed caller turn spends its time.</p></div><StatusPill tone={state === "live" ? "mint" : "slate"}>{state === "live" ? `Schema v${schema}` : "Cached"}</StatusPill></div>
+    <div className="latency-headline" aria-label="Headline latency percentiles">
+      <div><span>Model text</span><strong>{formatLatency(decoded?.p50_ms)}</strong><small>p50 decoded TTFT</small></div>
+      <div><span>TTS audio</span><strong>{formatLatency(synthesized?.p50_ms)}</strong><small>p50 provider audio</small></div>
+      <div><span>Real answer</span><strong>{formatLatency(audible?.p50_ms)}</strong><small>p50 sent to VoiceLink</small></div>
+    </div>
+    <div className="latency-sample-note"><strong>{completed} completed schema-v{schema} turns</strong><span>{excluded ? `${excluded} legacy measurements excluded` : "No legacy measurements mixed in"}</span></div>
+    <div className="latency-columns" aria-hidden="true"><span>Metric</span><span>p50</span><span>p95</span></div>
+    {latencySections.map((section) => <section className="latency-group" key={section.key}>
+      <div className="latency-group-heading"><h3>{section.title}</h3><p>{section.description}</p></div>
+      <div className="latency-metric-list">{section.metrics.map(([key, label, kind]) => <LatencyMetricRow key={key} label={label} distribution={evaluation[section.key]?.[key]} kind={kind} />)}</div>
+    </section>)}
+    <p className="latency-footnote"><Icon name="shield" size={15} />p50 is the typical turn; p95 exposes the slow edge. Telephony values mark server handoff to VoiceLink, not confirmed playback on the caller’s handset.</p>
+  </section>;
+}
+
+function CallLatencySummary({ evaluation }) {
+  const decoded = evaluation.llm?.answer_decode_ttft_ms;
+  const tts = evaluation.tts?.tts_ttfa_ms;
+  const realAudio = evaluation.telephony?.first_real_answer_audio_ms || evaluation.first_real_answer_audio_proxy;
+  return <section className="turn-metrics"><div><h3>Voice evaluation</h3><span>Schema v{evaluation.definition?.measurement_schema_version || 3}</span></div><div className="call-latency-grid"><p><span>Decoded TTFT</span><strong>{formatLatency(decoded?.p50_ms)}</strong></p><p><span>TTS first audio</span><strong>{formatLatency(tts?.p50_ms)}</strong></p><p><span>Real answer</span><strong>{formatLatency(realAudio?.p50_ms)}</strong></p><p><span>Silent turns</span><strong>{evaluation.silent_turns ?? "—"}</strong></p></div><small>p50 values · real answer excludes latency cues</small></section>;
+}
+
 function ReviewPreview({ item, onOpen }) { return <button className="review-preview" onClick={onOpen}><div><span className="intent-label">Candidate · {item.intent.replace('_', ' ')}</span><p>{item.text}</p></div><div className="confidence"><strong>{item.confidence}</strong><span>confidence</span></div><Icon name="chevron" size={17} /></button>; }
 function ReviewView({ reviews, onOpen }) { return <section className="tab-page"><h2>Candidate labels</h2><p className="page-intro">These are MiniLM suggestions. A review never retrains the model automatically.</p>{reviews.length ? <div className="review-list">{reviews.map((item) => <ReviewPreview key={item.id} item={item} onOpen={(event) => onOpen(item, event)} />)}</div> : <div className="empty-state"><Icon name="check" size={24} /><h3>Queue cleared</h3><p>Your next nightly batch will appear here after classification.</p></div>}</section>; }
 function CallsView({ conversations, events, feedState, detail, detailState, onOpen, onClose }) {
@@ -345,7 +481,7 @@ function CallDetailView({ detail, loading, onClose }) {
   const evaluation = detail?.voice_evaluation || {};
   const productionEval = detail?.production_evaluation;
   const feedbackByTurn = Object.fromEntries((productionEval?.turn_feedback || []).map((item) => [item.turn_number, item]));
-  return <section className="tab-page call-detail-view"><button className="plain-link" onClick={onClose}>‹ Back to calls</button><div className="activity-heading"><div><h2>Call conversation</h2><p className="page-intro">{callerLabel(conversation?.customer_id)} · {relativeTime(conversation?.ended_at || conversation?.created_at)}</p></div><StatusPill tone={conversation?.judge_status === "completed" ? "mint" : "slate"}>{conversation?.judge_status || "Recorded"}</StatusPill></div><section className="call-summary"><span>Call summary</span><p>{conversation?.summary || "No summary is available for this call."}</p></section>{productionEval && <p className="review-disclosure">Human review is attached to eval run {productionEval.id.slice(0, 8)}. Generated rules stay inactive until you approve a priority.</p>}<div className="call-transcript">{turns.length ? turns.map((turn) => <article key={turn.turn_number} className="transcript-pair"><p className="transcript-user"><span>Caller</span>{turn.user}</p><p className="transcript-agent"><span>Relay · {turn.delivery_status || "recorded"}</span>{turn.assistant || <em>No assistant audio was handed off.</em>}</p><small>{turn.final_intent || turn.classifier_intent || turn.routed_intent || "generic"}{turn.flow_flags?.length ? ` · ${turn.flow_flags.join(", ")}` : ""}</small>{productionEval && <TurnFeedbackPanel runId={productionEval.id} turn={turn} initial={feedbackByTurn[turn.turn_number]} />}</article>) : <div className="event-empty"><strong>No turn pairs were stored</strong><p>This call may predate conversation logging.</p></div>}</div><section className="turn-metrics"><h3>Voice evaluation</h3><p>First audio p50: {evaluation.first_audible_reply_proxy?.p50_ms ?? "—"} ms · silent turns: {evaluation.silent_turns ?? "—"}</p><p>Barge-in p50: {evaluation.barge_in_stop_latency?.p50_ms ?? "—"} ms</p></section></section>;
+  return <section className="tab-page call-detail-view"><button className="plain-link" onClick={onClose}>‹ Back to calls</button><div className="activity-heading"><div><h2>Call conversation</h2><p className="page-intro">{callerLabel(conversation?.customer_id)} · {relativeTime(conversation?.ended_at || conversation?.created_at)}</p></div><StatusPill tone={conversation?.judge_status === "completed" ? "mint" : "slate"}>{conversation?.judge_status || "Recorded"}</StatusPill></div><section className="call-summary"><span>Call summary</span><p>{conversation?.summary || "No summary is available for this call."}</p></section>{productionEval && <p className="review-disclosure">Human review is attached to eval run {productionEval.id.slice(0, 8)}. Generated rules stay inactive until you approve a priority.</p>}<div className="call-transcript">{turns.length ? turns.map((turn) => <article key={turn.turn_number} className="transcript-pair"><p className="transcript-user"><span>Caller</span>{turn.user}</p><p className="transcript-agent"><span>Relay · {turn.delivery_status || "recorded"}</span>{turn.assistant || <em>No assistant audio was handed off.</em>}</p><small>{turn.final_intent || turn.classifier_intent || turn.routed_intent || "generic"}{turn.flow_flags?.length ? ` · ${turn.flow_flags.join(", ")}` : ""}</small>{productionEval && <TurnFeedbackPanel runId={productionEval.id} turn={turn} initial={feedbackByTurn[turn.turn_number]} />}</article>) : <div className="event-empty"><strong>No turn pairs were stored</strong><p>This call may predate conversation logging.</p></div>}</div><CallLatencySummary evaluation={evaluation} /></section>;
 }
 
 function TurnFeedbackPanel({ runId, turn, initial }) {
