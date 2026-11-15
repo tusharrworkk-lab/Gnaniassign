@@ -2,7 +2,7 @@
 
 ### Your AI phone presence — for customers, colleagues, and the calls you cannot pick up.
 
-Relay is a real-time, multilingual personal AI phone agent. It answers
+Relay is a real-time, multilingual personal AI phone agent that sits on your personal number. It answers
 authorised calls, supports natural language switching—including conversational
 Hinglish—understands the caller’s need, uses only owner-approved context/tools,
 and leaves an actionable call hand-off.
