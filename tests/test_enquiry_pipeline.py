@@ -818,6 +818,15 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(events[0], GnaniProcessing(timestamp="2026-10-20T00:00:00Z"))
         self.assertEqual(events[1], GnaniTranscript("mera order kahan hai", "s-1", 0, 640, 111))
 
+    def test_gnani_stt_defaults_to_hindi(self):
+        from unittest.mock import patch
+
+        with patch.dict("os.environ", {"GNANI_API_KEY": "test-key"}, clear=True):
+            stt = GnaniRealtimeStt()
+
+        self.assertEqual(stt.language_code, "hi-IN")
+        self.assertEqual(stt.headers["lang_code"], "hi-IN")
+
     def test_microphone_pcm_frames_coalesce_partial_alsa_reads(self):
         async def exercise():
             reader = asyncio.StreamReader()
