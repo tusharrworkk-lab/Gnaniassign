@@ -365,6 +365,31 @@ class ProductionEvalStore:
         run["turn_feedback"] = self.turn_feedback_for_run(run["id"])
         return run
 
+    def ensure_reviewable_call(self, session_id: str, customer_id: str | None = None) -> dict[str, Any]:
+        """Attach an operator-opened completed call to the human review queue.
+
+        Random production sampling remains useful for unattended quality audits,
+        but it must not decide whether an authenticated operator can review a call
+        they explicitly opened in the dashboard.
+        """
+        run_id = str(uuid4())
+        with self._connect() as connection, connection.cursor() as cursor:
+            self._prepare(cursor)
+            cursor.execute(
+                """
+                INSERT INTO voice_eval_runs
+                    (id,layer,session_id,customer_id,status,selection_reason,completed_at)
+                VALUES
+                    (%s,'production_sample',%s,%s,'pending_human_review','operator_opened',now())
+                ON CONFLICT (session_id) WHERE session_id IS NOT NULL DO NOTHING
+                """,
+                (run_id, session_id, customer_id),
+            )
+        run = self.get_by_session(session_id)
+        if run is None:
+            raise RuntimeError("Completed call could not be attached to human review")
+        return run
+
     def turn_feedback_for_run(self, run_id: str) -> list[dict[str, Any]]:
         rows = self._query(
             """

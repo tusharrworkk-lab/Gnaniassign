@@ -432,8 +432,15 @@ def create_app(registry: SessionRegistry | None = None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
         production_evaluation = None
         try:
-            from gnaniassignment.telephony.production_evals import ProductionEvalStore
-            production_evaluation = await asyncio.to_thread(ProductionEvalStore().get_by_session, session_id)
+            from gnaniassignment.telephony.production_evals import ProductionEvalStore, production_eval_enabled
+            production_store = ProductionEvalStore()
+            production_evaluation = await asyncio.to_thread(production_store.get_by_session, session_id)
+            if production_evaluation is None and conversation is not None and production_eval_enabled():
+                production_evaluation = await asyncio.to_thread(
+                    production_store.ensure_reviewable_call,
+                    session_id,
+                    conversation.get("customer_id"),
+                )
         except (RuntimeError, ValueError):
             # Calls remain inspectable when production evals are not configured.
             pass
