@@ -2,9 +2,10 @@
 
 ### Your AI phone presence — for customers, colleagues, and the calls you cannot pick up.
 
-Relay is a real-time personal AI phone agent. It answers authorised calls,
-speaks in Hinglish, understands the caller’s need, uses only owner-approved
-context/tools, and leaves an actionable call hand-off.
+Relay is a real-time, multilingual personal AI phone agent. It answers
+authorised calls, supports natural language switching—including conversational
+Hinglish—understands the caller’s need, uses only owner-approved context/tools,
+and leaves an actionable call hand-off.
 
 It is a configurable platform, not a hard-coded bot. The same voice core can
 run as a grocery-store concierge or a corporate employee assistant.
@@ -44,6 +45,44 @@ Both configurations use the same invariants:
 4. ask only for the single missing detail;
 5. preserve corrections made later in the call;
 6. store a compact hand-off without replaying an entire historic transcript.
+
+## Use Relay behind an existing personal number
+
+Relay does not require callers to learn a separate AI-agent number. The owner
+can enable carrier-level call forwarding from their existing personal number to
+the Relay/VoiceLink DID. The caller continues to dial the owner's normal number;
+when the selected forwarding condition is met, the carrier transfers that call
+to Relay and the assistant answers the forwarded leg.
+
+Common GSM MMI activation codes are:
+
+| Forwarding behaviour | Dial from the personal phone |
+|---|---|
+| Always forward (unconditional) | `**21*<Relay Phone Number>#` |
+| Forward when busy | `**67*<Relay Phone Number>#` |
+| Forward when unanswered | `**61*<Relay Phone Number>#` |
+| Forward when unreachable or without signal | `**62*<Relay Phone Number>#` |
+
+For example, the unconditional pattern is
+`**21*<Relay Phone Number>#`, followed by the phone's call button. Exact MMI
+support, activation behaviour, ringing timeout and forwarding charges vary by
+carrier, plan and country, so verify them with the mobile operator before
+production use.
+
+This preserves the inbound experience of calling the owner's main number. It
+does not automatically make outbound Relay calls present the owner's personal
+caller ID; outbound caller-ID presentation depends on the telephony provider,
+verified-number policy and local regulation.
+
+## Multilingual conversations
+
+The voice path is multilingual end to end: STT captures supported languages,
+the conversational layer preserves the caller's language and code-switching,
+and TTS speaks the resulting response. The default personal-assistant style is
+natural Roman-script Hinglish, but the runtime can follow another language when
+the caller clearly uses it. Persona prompts, evaluation sets and provider voice
+configuration remain explicit so multilingual support does not silently weaken
+privacy, tool or action boundaries.
 
 ## Why Relay is a real voice agent
 
