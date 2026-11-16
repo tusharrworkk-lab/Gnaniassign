@@ -183,7 +183,11 @@ class SttLlmDiagnosticApiTests(unittest.TestCase):
                     "intent": "generic",
                     "topic": "availability",
                     "metrics": {
-                        "intent_ms": 3.0,
+                        "account_context_ms": 2.0,
+                        "router_ms": 3.0,
+                        "context_assembly_ms": 4.0,
+                        "retrieval_ms": 5.0,
+                        "prompt_build_ms": 6.0,
                         "provider_ttft_ms": 40.0,
                         "answer_decode_ttft_ms": 48.0,
                         "llm_total_stream_ms": 75.0,
@@ -220,6 +224,12 @@ class SttLlmDiagnosticApiTests(unittest.TestCase):
                 completed = next(event for event in events if event["type"] == "llm.completed")
                 self.assertEqual(completed["answer"], "Main check karti hoon.")
                 self.assertEqual(completed["metrics"]["stt_provider_ms"], 81.0)
+                self.assertEqual(completed["metrics"]["account_context_ms"], 2.0)
+                self.assertEqual(completed["metrics"]["router_ms"], 3.0)
+                self.assertEqual(completed["metrics"]["context_assembly_ms"], 4.0)
+                self.assertEqual(completed["metrics"]["retrieval_ms"], 5.0)
+                self.assertEqual(completed["metrics"]["prompt_build_ms"], 6.0)
+                self.assertEqual(completed["metrics"]["routing_prompt_ms"], 18.0)
                 self.assertEqual(completed["metrics"]["model_ttft_ms"], 40.0)
                 self.assertEqual(completed["metrics"]["answer_decode_ttft_ms"], 48.0)
                 self.assertEqual(completed["metrics"]["model_stream_ms"], 75.0)

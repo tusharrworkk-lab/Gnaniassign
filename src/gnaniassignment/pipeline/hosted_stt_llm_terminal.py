@@ -29,6 +29,11 @@ def _show_metrics(metrics: dict[str, Any]) -> None:
     for label, key in (
         ("STT provider", "stt_provider_ms"),
         ("endpoint -> transcript", "endpoint_to_final_ms"),
+        ("account context", "account_context_ms"),
+        ("router", "router_ms"),
+        ("context assembly", "context_assembly_ms"),
+        ("retrieval", "retrieval_ms"),
+        ("prompt build", "prompt_build_ms"),
         ("routing + prompt", "routing_prompt_ms"),
         ("model TTFT", "model_ttft_ms"),
         ("answer decode TTFT", "answer_decode_ttft_ms"),
@@ -38,6 +43,8 @@ def _show_metrics(metrics: dict[str, Any]) -> None:
         ("speech end -> first answer", "estimated_speech_end_to_first_answer_ms"),
     ):
         print(f"  {label:<29} {_latency(metrics.get(key))}", flush=True)
+    if metrics.get("structured_parse_degraded"):
+        print("  response structure            degraded; streamed answer salvaged", flush=True)
 
 
 async def run(

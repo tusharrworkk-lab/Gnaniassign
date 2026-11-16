@@ -8,6 +8,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from gnaniassignment.orchestration.episodic_memory import EpisodicMemoryStore
+from gnaniassignment.llm.agents.enquiry import MalformedAgentResponseError
 from gnaniassignment.llm.memory import ChatTurn
 from gnaniassignment.orchestration.call_facts import apply_memory_operations, extract_deterministic_facts
 from gnaniassignment.orchestration.working_memory import update_working_memory
@@ -92,8 +93,11 @@ class TurnSession:
             account_context_ms = round((time.perf_counter() - account_context_started) * 1000, 1)
             config = {"configurable": {"on_answer_chunk": on_chunk}} if on_chunk is not None else None
             result = self.graph.invoke({"session_id": self.session_id, "text": text, "answers": {}, "intent": "", "topic": "", "history": self.history, "prior_call_context": self.prior_call_context, "current_call_history": self.call_context_turns, "call_memo": self.call_memo or "No call memo yet.", "call_facts": self.call_facts, "working_memory": self.working_memory, "account_context": self.account_context, "memory": "", "replies": [], "spoken": None, "metrics": {"account_context_ms": account_context_ms}}, config=config)
-        except Exception:
-            if not defer_delivery:
+        except Exception as error:
+            # A malformed structured completion must never be concatenated
+            # with the caller's next utterance. Transient provider failures
+            # remain retryable through the existing buffered-turn behavior.
+            if not defer_delivery and not isinstance(error, MalformedAgentResponseError):
                 self.phrases = [text]
             raise
         self.working_memory = result["working_memory"]

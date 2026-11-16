@@ -206,6 +206,17 @@ async def handle_stt_llm_diagnostic_websocket(websocket: WebSocket) -> None:
                             emit("llm.first_answer", turn=turn_index, transcript_to_first_answer_ms=round((first_answer_at - committed_at) * 1000, 1))
                             emit("llm.delta", turn=turn_index, text=answer)
                     graph_metrics = result.get("metrics", {})
+                    routing_prompt_parts = (
+                        graph_metrics.get("router_ms", graph_metrics.get("intent_ms")),
+                        graph_metrics.get("context_assembly_ms"),
+                        graph_metrics.get("retrieval_ms"),
+                        graph_metrics.get("prompt_build_ms"),
+                    )
+                    routing_prompt_ms = sum(
+                        float(value)
+                        for value in routing_prompt_parts
+                        if isinstance(value, (int, float))
+                    )
                     transcript_to_first_ms = (
                         (first_answer_at - committed_at) * 1000 if first_answer_at is not None else None
                     )
@@ -217,7 +228,14 @@ async def handle_stt_llm_diagnostic_websocket(websocket: WebSocket) -> None:
                         "turn": turn_index,
                         "stt_provider_ms": _number(event.latency_ms),
                         "endpoint_to_final_ms": _number(endpoint_to_final_ms),
-                        "routing_prompt_ms": _number(graph_metrics.get("intent_ms")),
+                        "account_context_ms": _number(graph_metrics.get("account_context_ms")),
+                        "router_ms": _number(
+                            graph_metrics.get("router_ms", graph_metrics.get("intent_ms"))
+                        ),
+                        "context_assembly_ms": _number(graph_metrics.get("context_assembly_ms")),
+                        "retrieval_ms": _number(graph_metrics.get("retrieval_ms")),
+                        "prompt_build_ms": _number(graph_metrics.get("prompt_build_ms")),
+                        "routing_prompt_ms": _number(routing_prompt_ms),
                         # The production graph uses the provider/decoder names;
                         # retain the terminal's concise field names on the wire.
                         "model_ttft_ms": _number(
@@ -229,6 +247,12 @@ async def handle_stt_llm_diagnostic_websocket(websocket: WebSocket) -> None:
                         "transcript_to_first_answer_ms": _number(transcript_to_first_ms),
                         "model_stream_ms": _number(
                             graph_metrics.get("llm_total_stream_ms", graph_metrics.get("llm_stream_ms"))
+                        ),
+                        "structured_parse_degraded": bool(
+                            graph_metrics.get("structured_parse_degraded", False)
+                        ),
+                        "memory_fallback_used": bool(
+                            graph_metrics.get("memory_fallback_used", False)
                         ),
                         "llm_pipeline_total_ms": round((completed_at - llm_started) * 1000, 1),
                         "estimated_speech_end_to_first_answer_ms": _number(speech_end_to_first_ms),
