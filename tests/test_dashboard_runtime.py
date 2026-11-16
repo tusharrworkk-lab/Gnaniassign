@@ -9,9 +9,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from gnaniassignment.api.server import RuntimeEvents, SessionRegistry, create_app
 from gnaniassignment.prompts.tree import PromptNode, PromptPlan, _validate_condition
+from gnaniassignment.voice.events import VoiceProcessing, VoiceTranscript
 
 
 class DashboardRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -89,4 +91,138 @@ class HarnessApiTests(unittest.TestCase):
             self.assertEqual(ended.status_code, 200)
             self.assertEqual(ended.json()["ended"], True)
             self.assertEqual(client.get(f"/v1/harness/conversations/{conversation_id}", headers={"X-API-Key": "test-key"}).status_code, 404)
+
+
+class SttLlmDiagnosticApiTests(unittest.TestCase):
+    def test_diagnostic_websocket_is_feature_gated(self) -> None:
+        environment = {
+            "AGENT_API_KEY": "test-key",
+            "AGENT_ENVIRONMENT": "production",
+            "STT_LLM_DIAGNOSTIC_ENABLED": "false",
+        }
+        with patch.dict(os.environ, environment, clear=False):
+            client = TestClient(create_app(SessionRegistry()))
+            with self.assertRaises(WebSocketDisconnect) as rejected:
+                with client.websocket_connect(
+                    "/v1/diagnostics/stt-llm",
+                    headers={"X-API-Key": "test-key"},
+                ):
+                    pass
+            self.assertEqual(rejected.exception.code, 1008)
+
+    def test_diagnostic_websocket_requires_api_key_and_reaches_handler(self) -> None:
+        async def fake_handler(websocket: object) -> None:
+            await websocket.accept()
+            await websocket.send_json({"type": "diagnostic.ready"})
+            await websocket.close()
+
+        environment = {
+            "AGENT_API_KEY": "test-key",
+            "AGENT_ENVIRONMENT": "production",
+            "STT_LLM_DIAGNOSTIC_ENABLED": "true",
+        }
+        target = "gnaniassignment.api.stt_llm_diagnostic.handle_stt_llm_diagnostic_websocket"
+        with patch.dict(os.environ, environment, clear=False), patch(target, fake_handler):
+            client = TestClient(create_app(SessionRegistry()))
+            with self.assertRaises(WebSocketDisconnect) as rejected:
+                with client.websocket_connect(
+                    "/v1/diagnostics/stt-llm",
+                    headers={"X-API-Key": "wrong-key"},
+                ):
+                    pass
+            self.assertEqual(rejected.exception.code, 1008)
+
+            with client.websocket_connect(
+                "/v1/diagnostics/stt-llm",
+                headers={"X-API-Key": "test-key"},
+            ) as websocket:
+                self.assertEqual(websocket.receive_json(), {"type": "diagnostic.ready"})
+
+    def test_diagnostic_streams_transcript_answer_and_metrics_without_tts(self) -> None:
+        class FakeStt:
+            model = "fake-stt"
+            language_code = "hi-IN"
+            sample_rate = 16000
+            frame_bytes = 1024
+            min_silence_ms = 400
+
+            def __init__(self) -> None:
+                self.frame_received = asyncio.Event()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def send_pcm(self, frame: bytes) -> None:
+                self.frame_received.set()
+
+            async def events(self):
+                await self.frame_received.wait()
+                yield VoiceProcessing()
+                yield VoiceTranscript(
+                    text="Tushar free hai?",
+                    segment_id="segment-1",
+                    latency_ms=81,
+                )
+                await asyncio.Future()
+
+        class FakeSession:
+            def record_stt_segment(self, *_args: object) -> None:
+                return None
+
+            def feed_final(self, phrase: str, *, detected_language_code: str | None = None):
+                return {"pending_text": phrase}
+
+            def feed_end(self, on_chunk=None):
+                if on_chunk is not None:
+                    on_chunk("Main check karti hoon.")
+                return {
+                    "spoken": "Main check karti hoon.",
+                    "intent": "generic",
+                    "topic": "availability",
+                    "metrics": {
+                        "intent_ms": 3.0,
+                        "llm_ttft_ms": 40.0,
+                        "llm_stream_ms": 75.0,
+                    },
+                }
+
+        environment = {
+            "AGENT_API_KEY": "test-key",
+            "AGENT_ENVIRONMENT": "production",
+            "STT_LLM_DIAGNOSTIC_ENABLED": "true",
+        }
+        module = "gnaniassignment.api.stt_llm_diagnostic"
+        with (
+            patch.dict(os.environ, environment, clear=False),
+            patch(f"{module}.create_session", return_value=FakeSession()),
+            patch(f"{module}.create_stt_provider", return_value=FakeStt()),
+        ):
+            client = TestClient(create_app(SessionRegistry()))
+            with client.websocket_connect(
+                "/v1/diagnostics/stt-llm",
+                headers={"X-API-Key": "test-key"},
+            ) as websocket:
+                websocket.send_json({"type": "start", "customer_id": "test", "persist": False})
+                connected = websocket.receive_json()
+                self.assertEqual(connected["type"], "connected")
+                self.assertFalse(connected["persisted"])
+                second = websocket.receive_json()
+                self.assertEqual(second["type"], "stt.connected")
+                websocket.send_bytes(b"\0" * 1024)
+                events = []
+                while not any(event.get("type") == "llm.completed" for event in events):
+                    received = websocket.receive_json()
+                    events.append(received)
+                completed = next(event for event in events if event["type"] == "llm.completed")
+                self.assertEqual(completed["answer"], "Main check karti hoon.")
+                self.assertEqual(completed["metrics"]["stt_provider_ms"], 81.0)
+                self.assertTrue(any(event["type"] == "transcript.final" for event in events))
+                websocket.send_json({"type": "stop"})
+                terminal = websocket.receive_json()
+                while terminal["type"] != "session.completed":
+                    terminal = websocket.receive_json()
+                self.assertEqual(terminal["turns"], 1)
 

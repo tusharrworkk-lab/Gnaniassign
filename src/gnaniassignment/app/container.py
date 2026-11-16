@@ -301,11 +301,17 @@ def create_session(
     session_id: str | None = None,
     shadow_observer: Callable[[dict], None] | None = None,
     shadow_error_observer: Callable[[Exception], None] | None = None,
+    persist_conversation: bool = True,
 ) -> TurnSession:
     load_environment()
     settings = settings or Settings.from_environment()
     memory_store, resolved_customer_id = create_episodic_memory_store(customer_id)
-    conversation_store = create_conversation_store()
+    conversation_store = create_conversation_store() if persist_conversation else None
+    if not persist_conversation:
+        # Diagnostic sessions still use production prompts and verified
+        # account-context providers, but must not read/write prior-call memory
+        # or enter the durable human-review queue.
+        memory_store = None
     prompt_resolver = create_prompt_resolver()
     router = create_intent_router(
         settings,
@@ -344,8 +350,8 @@ def create_session(
         memory_store=memory_store,
         customer_id=resolved_customer_id,
         conversation_store=conversation_store,
-        tracer=create_acil_tracer(),
-        call_judge=create_call_judge(),
+        tracer=create_acil_tracer() if persist_conversation else None,
+        call_judge=create_call_judge() if persist_conversation else None,
         account_context_provider=combine_account_context_providers(
             create_customer_order_window(resolved_customer_id),
             create_calendar_presence_window(),
