@@ -20,6 +20,10 @@ MAX_SUMMARY_CHARS = 320
 ANSWER_FIELD = re.compile(r'"answer"\s*:\s*"')
 
 
+class MalformedAgentResponseError(ValueError):
+    """The model began a structured response but did not finish valid JSON."""
+
+
 class _AnswerStream:
     """Decode only the answer JSON string as chunks arrive."""
 
@@ -140,7 +144,22 @@ class EnquiryAgent(SubAgent):
                     )
                 on_chunk(chunk)
                 plain_answer_streamed = True
-        output = self._parse_response("".join(raw_parts), text)
+        try:
+            output = self._parse_response("".join(raw_parts), text)
+        except MalformedAgentResponseError:
+            # The spoken answer is the first JSON field and may already be
+            # complete even when a later memory field is truncated/malformed.
+            # Preserve that completed answer without another model request;
+            # structured deterministic call facts still retain exact values.
+            if not (answer_stream.finished and answer_stream.emitted.strip()):
+                raise
+            self.last_metrics["structured_parse_degraded"] = 1
+            self.last_metrics["memory_fallback_used"] = 1
+            output = AgentResponse(
+                answer=answer_stream.emitted.strip(),
+                memory_summary=self._fallback_memory_summary(text, memory),
+                memory_operations=(),
+            )
         if not answer_stream.emitted and not plain_answer_streamed:
             if answer_text_started is None:
                 self.last_metrics["answer_decode_ttft_ms"] = round(
@@ -181,6 +200,17 @@ class EnquiryAgent(SubAgent):
         return self.system_prompt, user_prompt
 
     @staticmethod
+    def _fallback_memory_summary(text: str, memory: str) -> str:
+        marker = "Call working memo (concise state of this open call):\n"
+        current = ""
+        if marker in memory:
+            current = memory.split(marker, 1)[1].split("\n\nCurrent call context:", 1)[0].strip()
+            if current == "No call memo yet.":
+                current = ""
+        addition = f"Caller added: {' '.join(text.split())[:140]}."
+        return " ".join(part for part in (current, addition) if part)[:MAX_SUMMARY_CHARS]
+
+    @staticmethod
     def _parse_response(raw: str, text: str) -> AgentResponse:
         try:
             payload = json.loads(raw)
@@ -195,7 +225,7 @@ class EnquiryAgent(SubAgent):
                 return AgentResponse(answer=answer, memory_summary=summary, memory_operations=tuple(operations))
         except (json.JSONDecodeError, ValueError):
             if raw.lstrip().startswith("{"):
-                raise ValueError("Subagent returned malformed JSON") from None
+                raise MalformedAgentResponseError("Subagent returned malformed JSON") from None
         # Some small models may return plain text despite the requested format.
         answer = raw.strip()
         if not answer:

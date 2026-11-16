@@ -198,7 +198,7 @@ async def run(
                                             os.getenv("GNANI_TTS_POST_RESPONSE_CLEAR_THROAT_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
                                             and should_add_clear_throat(
                                                 llm_ttft_ms,
-                                                float(os.getenv("GNANI_TTS_POST_RESPONSE_CLEAR_THROAT_MS", "500")),
+                                                float(os.getenv("GNANI_TTS_POST_RESPONSE_CLEAR_THROAT_MS", "550")),
                                             )
                                         ),
                                         playback_gate=reply_playback_gate,

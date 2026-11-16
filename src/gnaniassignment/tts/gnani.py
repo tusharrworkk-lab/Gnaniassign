@@ -19,7 +19,7 @@ _INLINE_TAG = re.compile(r"<[^>]{1,80}>")
 _POSITIVE_REPLY = re.compile(r"\b(shukriya|dhanyavaad|good news|acchi khabar|khushi|congratulations)\b", re.I)
 
 
-def should_add_clear_throat(ttft_ms: float | int | None, threshold_ms: float = 700) -> bool:
+def should_add_clear_throat(ttft_ms: float | int | None, threshold_ms: float = 550) -> bool:
     """Deterministic latency rule; no LLM or judge participates in this decision."""
     return isinstance(ttft_ms, (int, float)) and ttft_ms > threshold_ms
 

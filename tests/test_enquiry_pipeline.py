@@ -8,7 +8,7 @@ import json
 import unittest
 from types import SimpleNamespace
 
-from gnaniassignment.llm.agents.enquiry import enquiry_agents
+from gnaniassignment.llm.agents.enquiry import MalformedAgentResponseError, enquiry_agents
 from gnaniassignment.llm.chat import BedrockChatModel, BedrockGptOssChatModel, CerebrasChatModel, DEFAULT_BEDROCK_MODEL, DEFAULT_BEDROCK_GPT_OSS_MODEL, DEFAULT_CEREBRAS_MODEL, DEFAULT_GROQ_MODEL, DEFAULT_SIMPLISMART_MODEL, DEFAULT_SUBAGENT_MODEL, GroqChatModel, SimplismartChatModel, VercelGatewayChatModel
 from gnaniassignment.llm.memory import ChatTurn, render_memory, select_memory, topic_from_query
 from gnaniassignment.llm.local_laya import LocalLayaRouter, require_requested_cuda
@@ -407,6 +407,9 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("You cannot place a call to Tushar", GENERIC_PROMPT)
         self.assertIn('"answer" first and "memory_summary" second', GENERIC_PROMPT)
         self.assertIn("complete current state of this call", GENERIC_PROMPT)
+        self.assertIn("at most once per call", GENERIC_PROMPT)
+        self.assertIn('answer exactly: "Koi problem nahi."', GENERIC_PROMPT)
+        self.assertIn("Never turn thanks into a note-taking action", GENERIC_PROMPT)
 
     def test_personal_assistant_prompt_requires_feminine_first_person_hinglish(self):
         self.assertIn("FEMALE PERSONA", GENERIC_PROMPT)
@@ -723,8 +726,8 @@ class PipelineTests(unittest.TestCase):
         )
 
     def test_clear_throat_is_a_deterministic_ttft_threshold(self):
-        self.assertFalse(should_add_clear_throat(700))
-        self.assertTrue(should_add_clear_throat(701))
+        self.assertFalse(should_add_clear_throat(550))
+        self.assertTrue(should_add_clear_throat(551))
         self.assertFalse(should_add_clear_throat(None))
 
     def test_voice_provider_registry_has_explicit_adapter_names(self):
@@ -1231,6 +1234,41 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual("".join(chunks), 'Hello "world".\nDone')
         self.assertEqual(result["spoken"], "".join(chunks))
         self.assertEqual(session.history[0].summary, "Greeting saved.")
+
+    def test_completed_streamed_answer_survives_malformed_memory_json(self):
+        class MalformedMemoryChat:
+            def stream_complete(self, system, user):
+                yield '{"answer":"Theek hai, main Tushar ke liye note kar leti hoon.",'
+                yield '"memory_summary":oops}'
+
+        session = TurnSession(build_graph(Router(), enquiry_agents(MalformedMemoryChat())))
+        chunks: list[str] = []
+        result = session.ask_stream("Saat baje.", chunks.append)
+
+        self.assertEqual("".join(chunks), "Theek hai, main Tushar ke liye note kar leti hoon.")
+        self.assertEqual(result["spoken"], "".join(chunks))
+        self.assertEqual(session.phrases, [])
+        self.assertEqual(len(session.call_turns), 1)
+        self.assertIn("Saat baje", session.call_turns[0].summary)
+        self.assertEqual(result["metrics"]["structured_parse_degraded"], 1)
+        self.assertEqual(result["metrics"]["memory_fallback_used"], 1)
+
+        # The next phrase is a new turn, not "Saat baje" concatenated again.
+        session.feed_final("Dhanyavaad.")
+        self.assertEqual(session.phrases, ["Dhanyavaad."])
+
+    def test_incomplete_structured_answer_is_not_replayed_into_next_turn(self):
+        class IncompleteAnswerChat:
+            def stream_complete(self, system, user):
+                yield '{"answer":"Theek hai'
+
+        session = TurnSession(build_graph(Router(), enquiry_agents(IncompleteAnswerChat())))
+        session.feed_final("Saat baje.")
+        with self.assertRaises(MalformedAgentResponseError):
+            session.feed_end(on_chunk=lambda _chunk: None)
+        self.assertEqual(session.phrases, [])
+        session.feed_final("Dhanyavaad.")
+        self.assertEqual(session.phrases, ["Dhanyavaad."])
 
     def test_memory_recall_acknowledgement_is_spoken_before_recalled_answer(self):
         prior = ChatTurn("old", "old", "Previous call: party at 6 PM.", "generic", "general")
