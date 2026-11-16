@@ -53,13 +53,14 @@ def _configured_provider(variable: str, factories: dict[str, object]) -> str:
     return provider
 
 
-def create_intent_router(settings: Settings, customer_id: str | None = None, conversation_store: PostgresConversationStore | None = None, shadow_observer: Callable[[dict], None] | None = None, shadow_error_observer: Callable[[Exception], None] | None = None) -> LayaGatewayRouter | LocalLayaRouter | LayaCppRouter | LayaLambdaRouter | HinglishRetailRouter | RetailMiniLMRouter | GenericRouter:
+def create_intent_router(settings: Settings, customer_id: str | None = None, conversation_store: PostgresConversationStore | None = None, shadow_observer: Callable[[dict], None] | None = None, shadow_error_observer: Callable[[Exception], None] | None = None, record_shadow_predictions: bool = True) -> LayaGatewayRouter | LocalLayaRouter | LayaCppRouter | LayaLambdaRouter | HinglishRetailRouter | RetailMiniLMRouter | GenericRouter:
     if settings.intent_provider == "generic":
         if os.getenv("SHADOW_INTENT_ENABLED", "false").lower() == "true":
             store = PostgresIntentFeedbackStore()
             shadow_router = RetailMiniLMRouter()
             def on_shadow_prediction(query: str, prediction: dict, session_id: str | None) -> None:
-                _record_shadow_prediction(store, conversation_store, customer_id, session_id, query, prediction)
+                if record_shadow_predictions:
+                    _record_shadow_prediction(store, conversation_store, customer_id, session_id, query, prediction)
                 if shadow_observer is not None:
                     shadow_observer(prediction)
 
@@ -306,12 +307,10 @@ def create_session(
     load_environment()
     settings = settings or Settings.from_environment()
     memory_store, resolved_customer_id = create_episodic_memory_store(customer_id)
-    conversation_store = create_conversation_store() if persist_conversation else None
-    if not persist_conversation:
-        # Diagnostic sessions still use production prompts and verified
-        # account-context providers, but must not read/write prior-call memory
-        # or enter the durable human-review queue.
-        memory_store = None
+    # Non-persistent diagnostics may read the same approved guidance and prior
+    # summaries as a production call, but receive no writable stores.
+    guidance_store = create_conversation_store()
+    conversation_store = guidance_store if persist_conversation else None
     prompt_resolver = create_prompt_resolver()
     router = create_intent_router(
         settings,
@@ -319,10 +318,11 @@ def create_session(
         conversation_store,
         shadow_observer=shadow_observer,
         shadow_error_observer=shadow_error_observer,
+        record_shadow_predictions=persist_conversation,
     )
     model = create_chat_model(settings)
     if settings.intent_provider == "generic":
-        guidance = conversation_store.active_guidance() if conversation_store is not None else ""
+        guidance = guidance_store.active_guidance() if guidance_store is not None else ""
         retriever = retriever or create_knowledge_retriever(("generic",))
         agents = generic_agents(
             model,
@@ -345,7 +345,7 @@ def create_session(
     else:
         agents = enquiry_agents(model, knowledge=knowledge, retriever=retriever)
         clarification_agent = None
-    return TurnSession(
+    session = TurnSession(
         build_graph(router, agents, threshold=settings.intent_threshold, clarification_agent=clarification_agent),
         memory_store=memory_store,
         customer_id=resolved_customer_id,
@@ -359,3 +359,8 @@ def create_session(
         ),
         session_id=session_id,
     )
+    if not persist_conversation:
+        # TurnSession has already loaded the caller's compact summaries. Drop
+        # the store now so turns and the final summary can never be appended.
+        session.memory_store = None
+    return session

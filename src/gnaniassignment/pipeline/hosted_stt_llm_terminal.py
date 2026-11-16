@@ -31,6 +31,7 @@ def _show_metrics(metrics: dict[str, Any]) -> None:
         ("endpoint -> transcript", "endpoint_to_final_ms"),
         ("routing + prompt", "routing_prompt_ms"),
         ("model TTFT", "model_ttft_ms"),
+        ("answer decode TTFT", "answer_decode_ttft_ms"),
         ("transcript -> first answer", "transcript_to_first_answer_ms"),
         ("model stream", "model_stream_ms"),
         ("complete LLM pipeline", "llm_pipeline_total_ms"),

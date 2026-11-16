@@ -218,9 +218,18 @@ async def handle_stt_llm_diagnostic_websocket(websocket: WebSocket) -> None:
                         "stt_provider_ms": _number(event.latency_ms),
                         "endpoint_to_final_ms": _number(endpoint_to_final_ms),
                         "routing_prompt_ms": _number(graph_metrics.get("intent_ms")),
-                        "model_ttft_ms": _number(graph_metrics.get("llm_ttft_ms")),
+                        # The production graph uses the provider/decoder names;
+                        # retain the terminal's concise field names on the wire.
+                        "model_ttft_ms": _number(
+                            graph_metrics.get("provider_ttft_ms", graph_metrics.get("llm_ttft_ms"))
+                        ),
+                        "answer_decode_ttft_ms": _number(
+                            graph_metrics.get("answer_decode_ttft_ms")
+                        ),
                         "transcript_to_first_answer_ms": _number(transcript_to_first_ms),
-                        "model_stream_ms": _number(graph_metrics.get("llm_stream_ms")),
+                        "model_stream_ms": _number(
+                            graph_metrics.get("llm_total_stream_ms", graph_metrics.get("llm_stream_ms"))
+                        ),
                         "llm_pipeline_total_ms": round((completed_at - llm_started) * 1000, 1),
                         "estimated_speech_end_to_first_answer_ms": _number(speech_end_to_first_ms),
                     }

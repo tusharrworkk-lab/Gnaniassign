@@ -184,8 +184,9 @@ class SttLlmDiagnosticApiTests(unittest.TestCase):
                     "topic": "availability",
                     "metrics": {
                         "intent_ms": 3.0,
-                        "llm_ttft_ms": 40.0,
-                        "llm_stream_ms": 75.0,
+                        "provider_ttft_ms": 40.0,
+                        "answer_decode_ttft_ms": 48.0,
+                        "llm_total_stream_ms": 75.0,
                     },
                 }
 
@@ -219,6 +220,9 @@ class SttLlmDiagnosticApiTests(unittest.TestCase):
                 completed = next(event for event in events if event["type"] == "llm.completed")
                 self.assertEqual(completed["answer"], "Main check karti hoon.")
                 self.assertEqual(completed["metrics"]["stt_provider_ms"], 81.0)
+                self.assertEqual(completed["metrics"]["model_ttft_ms"], 40.0)
+                self.assertEqual(completed["metrics"]["answer_decode_ttft_ms"], 48.0)
+                self.assertEqual(completed["metrics"]["model_stream_ms"], 75.0)
                 self.assertTrue(any(event["type"] == "transcript.final" for event in events))
                 websocket.send_json({"type": "stop"})
                 terminal = websocket.receive_json()
