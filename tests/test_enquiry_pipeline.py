@@ -397,11 +397,13 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result["intent"], "generic")
         self.assertEqual(len(chat.prompts), 1)
 
-    def test_personal_assistant_prompt_discloses_identity_and_blocks_impersonation(self):
+    def test_personal_assistant_prompt_uses_minimal_greeting_and_correct_identity(self):
         self.assertIn("opted in", GENERIC_PROMPT)
         self.assertIn("Never claim to be the owner or a human", GENERIC_PROMPT)
         self.assertIn("explicitly authorized", GENERIC_PROMPT)
-        self.assertIn("FIRST-REPLY DISCLOSURE", GENERIC_PROMPT)
+        self.assertIn('the spoken "answer" must be exactly: "Namaste."', GENERIC_PROMPT)
+        self.assertIn('Never say "aapke phone ki AI assistant", "aapki assistant"', GENERIC_PROMPT)
+        self.assertIn('Main Tushar ki AI assistant hoon—jis number par aapne call kiya hai.', GENERIC_PROMPT)
         self.assertIn("You cannot place a call to Tushar", GENERIC_PROMPT)
         self.assertIn('"answer" first and "memory_summary" second', GENERIC_PROMPT)
         self.assertIn("complete current state of this call", GENERIC_PROMPT)
