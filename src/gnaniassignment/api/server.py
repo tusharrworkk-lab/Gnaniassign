@@ -252,6 +252,14 @@ def _authorize_voicelink_websocket(token: str | None) -> bool:
     return token is not None and hmac.compare_digest(token, configured)
 
 
+def _authorize_diagnostic_websocket(api_key: str | None) -> bool:
+    """Use the dashboard API key in a header; never expose it in a WSS URL."""
+    configured = os.getenv("AGENT_API_KEY")
+    if not configured:
+        return os.getenv("AGENT_ENVIRONMENT", "development").lower() != "production"
+    return api_key is not None and hmac.compare_digest(api_key, configured)
+
+
 def _prompt_plan_payload(plan: PromptPlan | None) -> dict[str, Any]:
     runtime_enabled = os.getenv("PROMPT_TREE_ENABLED", "false").lower() == "true"
     if plan is None:
@@ -360,6 +368,22 @@ def create_app(registry: SessionRegistry | None = None) -> FastAPI:
             await handle_voicelink_websocket(websocket, sessions.events)
         except WebSocketDisconnect:
             return
+
+    @app.websocket("/v1/diagnostics/stt-llm")
+    async def stt_llm_diagnostic(websocket: WebSocket) -> None:
+        """Private production-composition STT -> LLM test; never invokes TTS."""
+        enabled = os.getenv("STT_LLM_DIAGNOSTIC_ENABLED", "false").lower() in {
+            "1", "true", "yes", "on",
+        }
+        if not enabled or not _authorize_diagnostic_websocket(
+            websocket.headers.get("x-api-key")
+        ):
+            await websocket.close(code=1008)
+            return
+        from gnaniassignment.api.stt_llm_diagnostic import (
+            handle_stt_llm_diagnostic_websocket,
+        )
+        await handle_stt_llm_diagnostic_websocket(websocket)
 
     @app.get("/v1/dashboard/events")
     async def dashboard_events(x_api_key: str | None = Header(default=None)) -> StreamingResponse:
