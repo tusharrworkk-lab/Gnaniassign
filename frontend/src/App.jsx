@@ -463,8 +463,8 @@ function LatencyView({ evaluation, state, onBack, onRefresh }) {
 function CallLatencySummary({ evaluation }) {
   const decoded = evaluation.llm?.answer_decode_ttft_ms;
   const tts = evaluation.tts?.tts_ttfa_ms;
-  const realAudio = evaluation.telephony?.first_real_answer_audio_ms || evaluation.first_real_answer_audio_proxy;
-  return <section className="turn-metrics"><div><h3>Voice evaluation</h3><span>Schema v{evaluation.definition?.measurement_schema_version || 3}</span></div><div className="call-latency-grid"><p><span>Decoded TTFT</span><strong>{formatLatency(decoded?.p50_ms)}</strong></p><p><span>TTS first audio</span><strong>{formatLatency(tts?.p50_ms)}</strong></p><p><span>Real answer</span><strong>{formatLatency(realAudio?.p50_ms)}</strong></p><p><span>Silent turns</span><strong>{evaluation.silent_turns ?? "—"}</strong></p></div><small>p50 values · real answer excludes latency cues</small></section>;
+  const responseAudio = evaluation.telephony?.first_answer_audio_ms || evaluation.first_answer_audio_proxy;
+  return <section className="turn-metrics"><div><h3>Voice evaluation</h3><span>Schema v{evaluation.definition?.measurement_schema_version || 3}</span></div><div className="call-latency-grid"><p><span>Decoded TTFT</span><strong>{formatLatency(decoded?.p50_ms)}</strong></p><p><span>TTS first audio</span><strong>{formatLatency(tts?.p50_ms)}</strong></p><p><span>First response audio</span><strong>{formatLatency(responseAudio?.p50_ms)}</strong></p><p><span>Silent turns</span><strong>{evaluation.silent_turns ?? "—"}</strong></p></div><small>p50 values · first response includes a latency cue when one is played</small></section>;
 }
 
 function ReviewPreview({ item, onOpen }) { return <button className="review-preview" onClick={onOpen}><div><span className="intent-label">Candidate · {item.intent.replace('_', ' ')}</span><p>{item.text}</p></div><div className="confidence"><strong>{item.confidence}</strong><span>confidence</span></div><Icon name="chevron" size={17} /></button>; }
