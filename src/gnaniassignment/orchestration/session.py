@@ -131,7 +131,10 @@ class TurnSession:
                 for name, entry in self.call_facts.items()
             })
             record = ConversationRecord(
-                event_id=str(uuid4()), session_id=self.session_id, turn_number=len(self.history),
+                # Conversation analytics is scoped to this call. Prior-call
+                # summaries live in ``history`` too, so using its length
+                # shifts the first live turn and corrupts dashboard pairing.
+                event_id=str(uuid4()), session_id=self.session_id, turn_number=turn_number,
                 customer_id=self.customer_id, user_text=text, response_text=reply,
                 routed_intent=result["intent"], classifier_intent=classifier_intent,
                 classifier_confidence=classifier_confidence, working_memory=persisted_memory,

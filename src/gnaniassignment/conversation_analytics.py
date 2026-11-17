@@ -57,6 +57,43 @@ def call_summary(transcript: object, judge_result: object = None) -> str | None:
     return None
 
 
+def align_call_turns(
+    stored_turns: list[dict[str, Any]], transcript: object
+) -> list[dict[str, Any]]:
+    """Join analytics metadata to the call-local, delivery-aware transcript.
+
+    Older rows used total history length as ``turn_number``. A call with three
+    prior summaries therefore stored turns 4, 5, ... while its finalized
+    transcript correctly used 1, 2, ... . Sequence is the stable relationship
+    between these two ledgers, so align ordinally and expose call-local turn
+    numbers. The transcript remains authoritative for caller text and audio
+    actually handed off; database rows contribute review/classifier metadata.
+    """
+    actual_turns = [item for item in transcript if isinstance(item, dict)] if isinstance(transcript, list) else []
+    if not actual_turns:
+        return stored_turns
+
+    aligned: list[dict[str, Any]] = []
+    for index, actual in enumerate(actual_turns):
+        stored = stored_turns[index] if index < len(stored_turns) else {}
+        turn_number = actual.get("turn_number")
+        if not isinstance(turn_number, int):
+            turn_number = index + 1
+        generated = actual.get("generated_assistant")
+        if not isinstance(generated, str):
+            generated = stored.get("assistant") if isinstance(stored.get("assistant"), str) else ""
+        aligned.append({
+            **stored,
+            "turn_number": turn_number,
+            "user": str(actual.get("user") or stored.get("user") or ""),
+            "assistant": str(actual.get("assistant") or ""),
+            "generated_assistant": generated,
+            "delivery_status": actual.get("delivery_status"),
+            "routed_intent": actual.get("routed_intent") or stored.get("routed_intent"),
+        })
+    return aligned
+
+
 class ConversationJudge:
     """End-of-call evaluator. Implementations return structured evidence only."""
 
@@ -247,18 +284,7 @@ class PostgresConversationStore:
                 }
                 for item in cursor.fetchall()
             ]
-            actual_turns = {
-                item.get("turn_number"): item
-                for item in (row[3] if isinstance(row[3], list) else [])
-                if isinstance(item, dict) and isinstance(item.get("turn_number"), int)
-            }
-            for turn in turns:
-                actual = actual_turns.get(turn["turn_number"])
-                if actual is None:
-                    continue
-                turn["generated_assistant"] = turn["assistant"]
-                turn["assistant"] = str(actual.get("assistant") or "")
-                turn["delivery_status"] = actual.get("delivery_status")
+            turns = align_call_turns(turns, row[3])
         return {
             "session_id": row[0], "customer_id": row[1], "stt_segments": row[2],
             "transcript": row[3], "judge_status": row[4], "judge_result": row[5],

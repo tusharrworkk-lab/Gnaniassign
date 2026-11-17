@@ -434,6 +434,62 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(store.records[0].user_text, "Mera order late hai, order ID ORD-1042 hai")
         self.assertEqual(store.records[0].routed_intent, "generic")
 
+    def test_conversation_record_turn_number_excludes_prior_call_summaries(self):
+        prior = [
+            ChatTurn(f"old-{index}", "old", f"Prior summary {index}", "generic", "general")
+            for index in range(3)
+        ]
+
+        class MemoryStore:
+            def load_call_summaries(self, customer_id, limit):
+                return prior
+
+            def append(self, customer_id, session_id, turn):
+                return None
+
+        class ConversationStore:
+            def __init__(self):
+                self.records = []
+
+            def append(self, record):
+                self.records.append(record)
+
+            def attach_followup(self, session_id, next_user_text):
+                return []
+
+        store = ConversationStore()
+        session = TurnSession(
+            build_graph(GenericRouter(), generic_agents(Chat())),
+            memory_store=MemoryStore(),
+            customer_id="caller-1",
+            conversation_store=store,
+        )
+        session.ask("Hello")
+        self.assertEqual(len(session.history), 4)
+        self.assertEqual(store.records[0].turn_number, 1)
+
+    def test_historical_offset_turns_align_to_call_local_transcript(self):
+        from gnaniassignment.conversation_analytics import align_call_turns
+
+        stored = [
+            {"turn_number": 4, "user": "Hello", "assistant": "Namaste.", "flow_status": "ok"},
+            {"turn_number": 5, "user": "Who are you?", "assistant": "Generated identity", "flow_status": "ok"},
+        ]
+        transcript = [
+            {"turn_number": 1, "user": "Hello", "assistant": "Namaste.", "delivery_status": "audio_sent", "routed_intent": "generic"},
+            {"turn_number": 2, "user": "Who are you?", "assistant": "Spoken identity", "generated_assistant": "Generated identity", "delivery_status": "audio_sent", "routed_intent": "generic"},
+            {"turn_number": 3, "user": "Bye", "assistant": "", "generated_assistant": "Take care.", "delivery_status": "generated", "routed_intent": "generic"},
+        ]
+
+        aligned = align_call_turns(stored, transcript)
+
+        self.assertEqual([turn["turn_number"] for turn in aligned], [1, 2, 3])
+        self.assertEqual(aligned[0]["assistant"], "Namaste.")
+        self.assertEqual(aligned[1]["assistant"], "Spoken identity")
+        self.assertEqual(aligned[1]["generated_assistant"], "Generated identity")
+        self.assertEqual(aligned[2]["assistant"], "")
+        self.assertEqual(aligned[2]["delivery_status"], "generated")
+
     def test_flow_flags_find_repeated_field_requests_and_english(self):
         flags = flow_flags("Please share your order ID so I can help.", {"order_id": "ORD-1042"})
         self.assertIn("repeated_known_field_request", flags)
