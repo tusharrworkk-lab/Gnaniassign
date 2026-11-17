@@ -734,7 +734,7 @@ async def _reply_to_transcript(call: VoiceLinkCall, stt_event: VoiceTranscript, 
             nonlocal clear_throat_started, failure_stage
             if os.getenv("GNANI_TTS_POST_RESPONSE_CLEAR_THROAT_ENABLED", "false").lower() not in {"1", "true", "yes", "on"}:
                 return False
-            threshold_ms = max(0.0, float(os.getenv("GNANI_TTS_POST_RESPONSE_CLEAR_THROAT_MS", "550")))
+            threshold_ms = max(0.0, float(os.getenv("GNANI_TTS_POST_RESPONSE_CLEAR_THROAT_MS", "650")))
             await asyncio.sleep(threshold_ms / 1000)
             if first_chunk_at is not None or generation.done() or call.reply_interrupted.is_set():
                 return False
