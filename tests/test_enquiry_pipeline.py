@@ -782,8 +782,8 @@ class PipelineTests(unittest.TestCase):
         )
 
     def test_clear_throat_is_a_deterministic_ttft_threshold(self):
-        self.assertFalse(should_add_clear_throat(550))
-        self.assertTrue(should_add_clear_throat(551))
+        self.assertFalse(should_add_clear_throat(650))
+        self.assertTrue(should_add_clear_throat(651))
         self.assertFalse(should_add_clear_throat(None))
 
     def test_voice_provider_registry_has_explicit_adapter_names(self):
