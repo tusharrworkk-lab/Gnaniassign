@@ -1003,6 +1003,10 @@ class PipelineTests(unittest.TestCase):
 
     def test_generic_prompt_prevents_repeated_greetings_on_continuing_calls(self):
         self.assertIn("Greet at most once per call", GENERIC_PROMPT)
+        self.assertIn("only on the first turn", GENERIC_PROMPT)
+        self.assertIn("respond directly to the caller's latest meaning", GENERIC_PROMPT)
+        self.assertIn("Never repeat the same invitation or clarification on consecutive turns", GENERIC_PROMPT)
+        self.assertNotIn('answer briefly with "Haan ji, bataiye."', GENERIC_PROMPT)
         self.assertIn("continuing call", GENERIC_PROMPT)
 
     def test_generic_prompt_keeps_clear_message_acknowledgements_natural(self):
